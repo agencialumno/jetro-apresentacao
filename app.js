@@ -1286,17 +1286,23 @@ async function buscarInadimplenciaAutomatico() {
     } catch (e) { /* endpoint de unidades falhou — degrada sem quebrar o resto */ }
 
     // Garantidora: só existe se o condomínio tem fl_garantido_cond (1/-1). Sem isso (vazio) => 0%.
+    // Uma mesma unidade pode ter cobranças orgânicas e garantidas simultaneamente, então cada carteira é contada de forma independente.
     let temGarantidora = false;
     try { temGarantidora = await fetchCondominioGarantido(idCondominio); } catch (e) { /* assume sem garantidora */ }
-    const garantidas = todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => cobrancaGarantida(c))).length;
+    const garantidas = temGarantidora
+      ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => cobrancaGarantida(c))).length
+      : 0;
+    const organicas = temGarantidora
+      ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => !cobrancaGarantida(c))).length
+      : unidadesInad;
 
     if (totalUnidades) {
       document.getElementById("f_inad_unidades_total").value = String(totalUnidades);
       recalcInadPct();
       const pctDe = (n) => ((n / totalUnidades) * 100).toFixed(2).replace(".", ",");
       document.getElementById("f_inad_garantidora").value = temGarantidora ? pctDe(garantidas) : "0,00";
-      document.getElementById("f_inad_organica").value = pctDe(unidadesInad - (temGarantidora ? garantidas : 0));
-      setStatus("statusInad", true, unidadesInad + " de " + totalUnidades + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor, cobranças e as 3 porcentagens preenchidos" + (temGarantidora ? " (condomínio com garantidora: " + garantidas + " unidade(s) garantida(s))." : " (condomínio sem garantidora: garantidora = 0%).") + "");
+      document.getElementById("f_inad_organica").value = pctDe(organicas);
+      setStatus("statusInad", true, unidadesInad + " de " + totalUnidades + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor, cobranças e as 3 porcentagens preenchidos" + (temGarantidora ? " (orgânica: " + organicas + " unid. | garantidora: " + garantidas + " unid.)." : " (condomínio sem garantidora: garantidora = 0%)."));
     } else {
       setStatus("statusInad", true, unidadesInad + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor e cobranças preenchidos. Não consegui o total de unidades; as 3 % seguem manuais.");
     }
