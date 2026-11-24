@@ -2819,6 +2819,36 @@ function linhasResumo(a11, offset, nMeses, soGrupos) {
   return linhas;
 }
 
+function calcularDiferencaMediaRateio(prev) {
+  const ra = prev && prev.rateioAtual;
+  const rp = prev && prev.rateioPrevisto;
+  const itensA = (ra && ra.itens) || [];
+  const itensP = (rp && rp.itens) || [];
+  if (itensA.length && itensP.length) {
+    const diffs = [];
+    const usados = new Set();
+    itensA.forEach((a, idxA) => {
+      const na = String(a.nome || "").trim().toLowerCase();
+      let idxP = itensP.findIndex((p, k) => !usados.has(k) && String(p.nome || "").trim().toLowerCase() === na);
+      if (idxP < 0 && idxA < itensP.length && !usados.has(idxA)) idxP = idxA;
+      if (idxP >= 0) {
+        usados.add(idxP);
+        const p = itensP[idxP];
+        if (typeof a.recibo === "number" && typeof p.recibo === "number") diffs.push(p.recibo - a.recibo);
+      }
+    });
+    if (diffs.length) {
+      const ref = itensP.length ? itensP : itensA;
+      const ehFracoes = ref.length >= 2 && !ref.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+      return ehFracoes ? (diffs.reduce((s, d) => s + d, 0) / diffs.length) : diffs.reduce((s, d) => s + d, 0);
+    }
+  }
+  for (const b of [ra, rp]) {
+    if (b && b.reajuste !== null && b.reajuste !== undefined && !b.reajusteIsPercent) return b.reajuste;
+  }
+  return null;
+}
+
 /* ---------- Monta a lista de slides a partir do que já foi preenchido ---------- */
 function buildSlideSpecs() {
   const specs = [];
@@ -2989,12 +3019,15 @@ function buildSlideSpecs() {
         const prevR = PARSED.prev;
         if (prevR.rateioAtual || prevR.rateioPrevisto) {
           const cards = [];
+          let reajustePct = null;
           [prevR.rateioAtual, prevR.rateioPrevisto].forEach((b) => {
-            if (b && b.reajuste !== null && b.reajuste !== undefined) {
-              if (b.reajusteIsPercent) cards.push(["Reajuste do rateio", (b.reajuste * 100).toFixed(2).replace(".", ",") + "%"]);
-              else cards.push(["Diferença do rateio", "R$ " + fmtBRL(b.reajuste)]);
-            }
+            if (b && b.reajuste !== null && b.reajuste !== undefined && b.reajusteIsPercent) reajustePct = b.reajuste;
           });
+          if (reajustePct !== null) cards.push(["Reajuste do rateio", (reajustePct * 100).toFixed(2).replace(".", ",") + "%"]);
+
+          const diffMedia = calcularDiferencaMediaRateio(prevR);
+          if (diffMedia !== null) cards.push(["Diferença média por unidade", "R$ " + fmtBRL(diffMedia)]);
+
           if ((prevR.totalDespesasAtual !== null && prevR.totalDespesasAtual !== undefined) || (prevR.totalDespesasPrevisto !== null && prevR.totalDespesasPrevisto !== undefined)) {
             cards.push(["Total de despesas (atual \u2192 previsto)", fmtBRL(prevR.totalDespesasAtual) + " \u2192 " + fmtBRL(prevR.totalDespesasPrevisto)]);
           }

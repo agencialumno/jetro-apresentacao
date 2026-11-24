@@ -1054,6 +1054,32 @@ def _linhas_resumo(a11, offset, n_meses, so_grupos=False):
     linhas.append(("Saldo Final", fat(a11.get("saldoFinal")), True, 0, True))
     return linhas
 
+def _diferenca_media_rateio(prev):
+    ra = prev.get("rateioAtual")
+    rp = prev.get("rateioPrevisto")
+    itens_a = (ra.get("itens") or []) if ra else []
+    itens_p = (rp.get("itens") or []) if rp else []
+    if itens_a and itens_p:
+        diffs = []
+        usados = set()
+        for idx_a, a in enumerate(itens_a):
+            na = (a.get("nome") or "").strip().lower()
+            idx_p = next((k for k, p in enumerate(itens_p) if k not in usados and (p.get("nome") or "").strip().lower() == na), None)
+            if idx_p is None and idx_a < len(itens_p) and idx_a not in usados:
+                idx_p = idx_a
+            if idx_p is not None:
+                usados.add(idx_p)
+                p = itens_p[idx_p]
+                if isinstance(a.get("recibo"), (int, float)) and isinstance(p.get("recibo"), (int, float)):
+                    diffs.append(float(p["recibo"]) - float(a["recibo"]))
+        if diffs:
+            ref = itens_p or itens_a
+            eh_fracoes = len(ref) >= 2 and not all(re.match(r"^(cota|fundo|[áa]gua|taxa)", (it.get("nome") or "").strip(), re.I) for it in ref)
+            return (sum(diffs) / len(diffs)) if eh_fracoes else sum(diffs)
+    for b in (ra, rp):
+        if b and b.get("reajuste") is not None and not b.get("reajusteIsPercent"):
+            return float(b["reajuste"])
+    return None
 
 def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
     prs = Presentation(template_path)
@@ -1387,12 +1413,17 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 _add_rateio_table(s_rateio, Inches(10.2), rateio_previsto, "Previsão (novo rateio)")
 
                 destaques = []
+                reajuste_pct = None
                 for bloco in (rateio_atual, rateio_previsto):
-                    if bloco and bloco.get("reajuste") is not None:
-                        if bloco.get("reajusteIsPercent"):
-                            destaques.append(("Reajuste do rateio", f"{bloco['reajuste']*100:.2f}".replace(".", ",") + "%"))
-                        else:
-                            destaques.append(("Diferença do rateio", "R$ " + fmt_brl(bloco["reajuste"])))
+                    if bloco and bloco.get("reajuste") is not None and bloco.get("reajusteIsPercent"):
+                        reajuste_pct = bloco["reajuste"]
+                if reajuste_pct is not None:
+                    destaques.append(("Reajuste do rateio", f"{reajuste_pct*100:.2f}".replace(".", ",") + "%"))
+
+                diff_media = _diferenca_media_rateio(prev)
+                if diff_media is not None:
+                    destaques.append(("Diferença média por unidade", "R$ " + fmt_brl(diff_media)))
+
                 if prev.get("totalDespesasAtual") is not None or prev.get("totalDespesasPrevisto") is not None:
                     destaques.append(("Total de despesas (atual \u2192 previsto)", fmt_brl(prev.get("totalDespesasAtual")) + " \u2192 " + fmt_brl(prev.get("totalDespesasPrevisto"))))
                 if destaques:
