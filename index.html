@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gerador de Apresentações — Jetro</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<aside class="sidebar">
+  <img class="logo-big" src="logo-branca.png" alt="Jetro">
+  <nav id="sidebarNav">
+    <button type="button" class="nav-btn active" data-panel="1" data-label="Dados da assembleia">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"></rect><path d="M3 9h18M8 2v4M16 2v4"></path></svg>
+    </button>
+    <button type="button" class="nav-btn" data-panel="2" data-label="Relatório 11A">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 21V9M9 21V3M15 21v-7M21 21V11"></path></svg>
+    </button>
+    <button type="button" class="nav-btn" data-panel="3" data-label="Previsão Orçamentária">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>
+    </button>
+    <button type="button" class="nav-btn" data-panel="4" data-label="Relatório 16B">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="13" rx="2"></rect><path d="M2 10h20M7 15h3"></path></svg>
+    </button>
+    <button type="button" class="nav-btn" data-panel="5" data-label="Inadimplência">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 2 21h20L12 2Z"></path><path d="M12 9v5M12 17h.01"></path></svg>
+    </button>
+    <!-- abas dos tópicos da pauta: injetadas pelo app.js (criarSecaoTopico) -->
+    <div id="dynamicTopicsNav" style="display:contents;"></div>
+    <button type="button" class="nav-btn" data-panel="8" data-label="Canais de atendimento">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.7a2 2 0 0 1-.5 2.1L8 9.7a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.7.6a2 2 0 0 1 1.7 2Z"></path></svg>
+    </button>
+    <div class="sep"></div>
+    <button type="button" class="nav-btn gerar-btn" data-panel="9" data-label="Gerar Apresentação">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+    </button>
+  </nav>
+</aside>
+
+<div class="wrap">
+
+<header class="top">
+  <img id="headerLogo" src="logo-color.png" alt="Jetro" style="height:40px;">
+  <div class="title">
+    <h1>Gerador de Apresentações de Assembleia</h1>
+    <p>Monte a apresentação de PowerPoint a partir dos relatórios da assembleia</p>
+  </div>
+</header>
+
+<!-- STEP 1 -->
+<section class="panel active" id="panel-1" data-panel="1">
+  <div class="cards-grid">
+    <div class="card full">
+      <h2><span class="num">1</span> Dados da assembleia</h2>
+      <p class="sub">Essas informações vão na capa e na pauta</p>
+      <div class="body">
+        <label for="f_condominio">Nome do condomínio</label>
+        <div class="autocomplete-wrap">
+          <input type="text" id="f_condominio" autocomplete="off" placeholder="Digite para buscar na carteira Jetro...">
+          <input type="hidden" id="f_condominio_id">
+          <div id="condomDropdown" class="autocomplete-dropdown hidden"></div>
+        </div>
+        <div id="condomStatus" class="ac-status"></div>
+
+        <div class="row">
+          <div>
+            <label for="f_tipo">Tipo de assembleia</label>
+            <select id="f_tipo">
+              <option value="Assembleia Geral Ordinária">Assembleia Geral Ordinária (AGO)</option>
+              <option value="Assembleia Geral Extraordinária">Assembleia Geral Extraordinária (AGE)</option>
+            </select>
+          </div>
+          <div>
+            <label for="f_data">Data da assembleia</label>
+            <input type="date" id="f_data">
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="f_local">Local</label>
+            <input type="text" id="f_local" placeholder="Ex: Salão de festas do condomínio">
+          </div>
+          <div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-left:0;">Convocação</h2>
+      <p class="sub" style="margin-left:0;">Horários da 1ª e 2ª chamada</p>
+      <div style="margin-left:0;">
+        <label for="f_conv1">1ª convocação</label>
+        <input type="time" id="f_conv1">
+        <label for="f_conv2">2ª convocação</label>
+        <input type="time" id="f_conv2">
+        <button type="button" class="secondary" id="btnConv2Auto" style="margin-top:6px;">+30min da 1ª</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-left:0;">Pauta</h2>
+      <p class="sub" style="margin-left:0;">Arraste para reordenar, edite o texto ou remova qualquer item. Cada tópico novo ganha uma aba própria para o conteúdo do slide. Remover "Prestação de contas" ou "Previsão orçamentária" desativa as abas e os slides correspondentes.</p>
+      <div style="margin-left:0;">
+        <div id="pautaList"></div>
+        <p class="pauta-hint" id="pautaHint"></p>
+        <button type="button" class="add-link" id="addPauta">+ adicionar item da pauta</button>
+        <button type="button" class="secondary" id="resetPauta" style="margin-left:10px;">Resetar pauta</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="panel-2" data-panel="2">
+<!-- STEP 2 -->
+<div class="card" id="step2">
+  <h2><span class="num">2</span> Relatório 11A — Demonstrativo de Receitas e Despesas</h2>
+  <p class="sub">Busca automática direto da Superlógica (últimos 12 meses, incluindo saldo anterior/final das contas bancárias) — ou envie o .xlsx manualmente</p>
+  <div class="body">
+    <button type="button" class="primary" id="btnBuscar11a" style="width:auto;padding:9px 16px;font-size:13px;" disabled>Buscar automaticamente (últimos 12 meses)</button>
+    <div class="status-line" id="status11a"></div>
+    <div id="preview11a"></div>
+    <details style="margin-top:14px;">
+      <summary style="cursor:pointer;font-size:12.5px;color:var(--muted);">Ou enviar arquivo .xlsx manualmente</summary>
+      <div class="dropzone" id="dz11a" style="margin-top:10px;">
+        <input type="file" id="file11a" accept=".xlsx,.xls">
+        Arraste o arquivo .xlsx do relatório 11A aqui, ou clique para selecionar
+      </div>
+    </details>
+  </div>
+</div>
+</section>
+
+<section class="panel" id="panel-3" data-panel="3">
+<!-- STEP 3 -->
+<div class="card" id="step3">
+  <h2><span class="num">3</span> Previsão Orçamentária</h2>
+  <p class="sub">Planilha .xlsx com o comparativo Atual x Previsto — alimenta os slides de previsão orçamentária</p>
+  <div class="body">
+    <div class="dropzone" id="dzpo">
+      <input type="file" id="filepo" accept=".xlsx,.xls">
+      Arraste o arquivo .xlsx da previsão orçamentária aqui, ou clique para selecionar
+    </div>
+    <div id="poManual" style="margin-top:14px;">
+      <h3 class="po-sub-h" style="margin:0 0 4px;">Preenchimento manual</h3>
+      <p class="hint" style="margin:0 0 8px;">Já vem com a estrutura do modelo (grupos e itens): é só digitar os valores. Sub-totais, totais e percentuais (garantidora, fundo de reserva) são calculados sozinhos. Passe o mouse sobre uma linha ou coluna para excluir, duplicar ou arrastar (&#10303;) e sobre a divisória entre elas para adicionar (+). Se você também enviar uma planilha, vale o que foi feito por último.</p>
+      <div id="poMassa" class="po-massa" hidden>
+        <strong>Ajuste em massa do Futuro <span class="po-opc">(atalho opcional)</span></strong>
+        <span class="hint">Aplica um percentual em todos os valores de "Futuro" de uma vez. Não é obrigatório: dá para editar cada linha direto na tabela, antes ou depois.</span>
+        <div class="po-massa-linha"><input type="text" id="poMassaPct" placeholder="+10 ou -5" inputmode="decimal"><span>%</span><button type="button" class="btn-sec" id="poMassaBtn">Aplicar no Futuro</button><span class="hint" id="poMassaRes"></span></div>
+      </div>
+      <div class="po-toolbar">
+        <button type="button" class="btn-sec" id="poModelo">Restaurar modelo</button>
+      </div>
+      <div class="preview-scroll"><div id="poManualTabela"></div></div>
+    </div>
+    <div id="poAbaWrap" class="po-aba" hidden>
+      <label for="poAbaSel">Aba da planilha usada na previsão:</label>
+      <select id="poAbaSel"></select>
+      <span class="hint">Este arquivo tem mais de uma aba com previsão. Por padrão vale a aba que estava aberta quando o arquivo foi salvo; troque aqui se precisar.</span>
+    </div>
+    <div class="status-line" id="statuspo"></div>
+    <div id="previewpo"></div>
+  </div>
+</div>
+</section>
+
+<section class="panel" id="panel-4" data-panel="4">
+<!-- STEP 4 -->
+<div class="card" id="step4">
+  <h2><span class="num">4</span> Relatório 16B — Resumo Financeiro</h2>
+  <p class="sub">Busca automática direto da Superlógica (saldo anterior/final e créditos/débitos de cada conta bancária)</p>
+  <div class="body">
+    <div class="row">
+      <div>
+        <label for="f_16b_data_ini">Data início</label>
+        <input type="date" id="f_16b_data_ini">
+      </div>
+      <div>
+        <label for="f_16b_data_fim">Data fim</label>
+        <input type="date" id="f_16b_data_fim">
+      </div>
+    </div>
+    <div id="contasSeletorWrap" class="contas-seletor"></div>
+    <button type="button" class="primary" id="btnBuscar16b" style="width:auto;padding:9px 16px;font-size:13px;margin-top:10px;" disabled>Buscar automaticamente (saldo das contas)</button>
+    <div class="status-line" id="status16b"></div>
+    <div id="preview16b"></div>
+    <p class="sub" style="margin:14px 0 6px;">Ou envie o relatório 16B (PDF ou planilha) — substitui a busca automática</p>
+    <div class="dropzone" id="dz16b">
+      <input type="file" id="file16b" accept=".pdf,.xlsx,.xls,.csv">
+      Arraste o relatório 16B (PDF ou planilha) aqui, ou clique para selecionar
+    </div>
+    <input type="hidden" id="f_16b_periodo">
+  </div>
+</div>
+</section>
+
+<section class="panel" id="panel-5" data-panel="5">
+<!-- STEP 5 -->
+<div class="card" id="step5">
+  <h2><span class="num">5</span> Inadimplência</h2>
+  <p class="sub">Busca automática direto da Superlógica (valor, cobranças e unidades) — as % orgânica/garantidora continuam manuais</p>
+  <div class="body">
+    <button type="button" class="primary" id="btnBuscarInad" style="width:auto;padding:9px 16px;font-size:13px;" disabled>Buscar automaticamente</button>
+    <div class="status-line" id="statusInad"></div>
+    <div class="row3" style="margin-top:14px;">
+      <div>
+        <label for="f_inad_organica">% Inadimplência orgânica</label>
+        <input type="text" id="f_inad_organica" placeholder="Ex: 22,00">
+      </div>
+      <div>
+        <label for="f_inad_garantidora">% Inadimplência garantidora</label>
+        <input type="text" id="f_inad_garantidora" placeholder="Ex: 39,00">
+      </div>
+      <div>
+        <label for="f_inad_total">% Inadimplência total</label>
+        <input type="text" id="f_inad_total" placeholder="Ex: 44,00">
+      </div>
+    </div>
+    <div class="row3">
+      <div>
+        <label for="f_inad_valor">Valor acumulado (R$)</label>
+        <input type="text" id="f_inad_valor" placeholder="Ex: 550.059,40">
+      </div>
+      <div>
+        <label for="f_inad_cobrancas">Nº de cobranças</label>
+        <input type="text" id="f_inad_cobrancas" placeholder="Ex: 1392">
+      </div>
+      <div>
+        <label for="f_inad_unidades">Nº de unidades inadimplentes</label>
+        <input type="text" id="f_inad_unidades" placeholder="Ex: 6">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="f_inad_unidades_total">Nº total de unidades do condomínio</label>
+        <input type="text" id="f_inad_unidades_total" placeholder="Ex: 44">
+      </div>
+      <div></div>
+    </div>
+    <p class="sub" style="margin:4px 0 0;">O % de inadimplência total é calculado sozinho: unidades inadimplentes ÷ total de unidades × 100.</p>
+  </div>
+</div>
+</section>
+
+<!-- seções dos tópicos da pauta: injetadas pelo app.js (criarSecaoTopico) -->
+<div id="dynamicTopicsPanels"></div>
+
+<section class="panel" id="panel-8" data-panel="8">
+<!-- STEP 8 -->
+<div class="card" id="step8">
+  <h2><span class="num">8</span> Canais de atendimento</h2>
+  <p class="sub">Aparece no slide final — já vem preenchido com os dados padrão da Jetro e fica travado para evitar alterações sem querer</p>
+  <div class="body" id="canaisBody">
+    <button type="button" class="secondary" id="btnTravaCanais" style="width:auto;padding:6px 12px;font-size:12.5px;margin-bottom:10px;">🔒 Destravar edição</button>
+    <div class="row">
+      <div>
+        <label for="f_tel">Telefone</label>
+        <input type="text" id="f_tel" value="(21) 3596-6640">
+      </div>
+      <div>
+        <label for="f_whats">WhatsApp</label>
+        <input type="text" id="f_whats" value="(21) 99866-6640">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="f_email">E-mail</label>
+        <input type="text" id="f_email" value="contato@jetroadm.com.br">
+      </div>
+      <div>
+        <label for="f_site">Site</label>
+        <input type="text" id="f_site" value="www.jetroadministradora.com.br">
+      </div>
+    </div>
+    <label for="f_endereco">Endereço</label>
+    <input type="text" id="f_endereco" value="Avenida Ayrton Senna, 5500 - Bloco 3 Sala 241 a 245">
+  </div>
+</div>
+</section>
+
+<section class="panel" id="panel-9" data-panel="9">
+  <div class="card full">
+    <h2 style="margin-left:0;">Gerar Apresentação</h2>
+    <p class="sub" style="margin-left:0;">Confira o resumo abaixo antes de gerar o arquivo .pptx</p>
+    <div id="resumoWrap" style="margin-left:0;"></div>
+    <div class="footer-generate">
+      <button class="primary" id="btnGerar">Gerar apresentação (.pptx)</button>
+      <div id="genMsg"></div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<aside class="preview-panel">
+  <p class="pv-title">Prévia da apresentação</p>
+  <div class="pv-thumbs" id="pvThumbs"></div>
+</aside>
+
+<div class="pv-fs-overlay hidden" id="pvFsOverlay">
+  <button type="button" class="pv-fs-close" id="pvFsClose" title="Fechar">✕</button>
+  <button type="button" class="pv-fs-nav pv-fs-prev" id="pvFsPrev" title="Slide anterior">‹</button>
+  <div class="pv-fs-slide-wrap"><div id="pvFsSlide"></div></div>
+  <button type="button" class="pv-fs-nav pv-fs-next" id="pvFsNext" title="Próximo slide">›</button>
+  <div class="pv-fs-label" id="pvFsLabel"></div>
+  <div class="pv-fs-ajuste" id="pvFsAjuste"></div>
+</div>
+
+<div class="modal-overlay hidden" id="errorModalOverlay">
+  <div class="modal-box">
+    <h3 id="modalTitle">⚠ Ops</h3>
+    <p id="modalMsg"></p>
+    <p class="modal-suggestion" id="modalSuggestion"></p>
+    <button class="primary" id="modalCloseBtn">Entendi</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
