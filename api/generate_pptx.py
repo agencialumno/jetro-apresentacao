@@ -1035,27 +1035,24 @@ def _slides_eleicao(novo_conteudo_fn, d):
 
 
 def _linhas_resumo(a11, offset, n_meses, so_grupos=False):
-    """Linhas do resumo 'Prestacao de contas': saldo anterior, TODAS as contas de receita do plano, total de receitas,
-    TODAS as de despesa, total de despesas e saldo final. [(nome, [12 valores], negrito, nivel_recuo)].
-    so_grupos=True: so os grupos de PRIMEIRO NIVEL (filhos diretos de Receitas/Despesas), sem entrar nos subniveis.
-    Regra geral, sem nomes fixos: se a secao tem uma unica raiz (nivel 0, natureza 0), o 1o nivel e o 1; senao, o menor nivel.
-    Mesma regra de linhasResumo em app.js."""
     def fat(arr):
-        return list(arr[offset:]) if arr else [None] * n_meses
+        return list(arr[offset:offset + n_meses]) if arr else [None] * n_meses
     contas = a11.get("contasPlano") or []
     linhas = [("Saldo anterior", fat(a11.get("saldoAnterior")), False, 0, False)]
-    sep = True  # a proxima linha abre um novo bloco (Receitas | Despesas | Saldo final)
+    sep = True
     for secao, chave, rotulo in (("receitas", "totalReceitas", "Total de Receitas"), ("despesas", "totalDespesas", "Total de Despesas")):
         da_secao = [c for c in contas if c.get("secao") == secao]
         niveis = [int(c.get("nivel", 0) or 0) for c in da_secao]
         raizes = [c for c in da_secao if int(c.get("nivel", 0) or 0) == 0]
         nivel_alvo = 1 if (len(raizes) == 1 and raizes[0].get("natureza") == "0" and 1 in niveis) else (min(niveis) if niveis else 0)
         for c in da_secao:
-            vals = [v or 0 for v in (c.get("valores") or [])[offset:]]
+            vals = [v or 0 for v in (c.get("valores") or [])[offset:offset + n_meses]]
             vals = (vals + [0] * n_meses)[:n_meses]
             niv = int(c.get("nivel", 0) or 0)
+            eh_grupo = c.get("natureza") == "0"
             if any(vals) and (not so_grupos or niv == nivel_alvo):
-                linhas.append((c["nome"], vals, c.get("natureza") == "0", 1 if so_grupos else 1 + max(0, niv), sep))
+                vals_exibir = None if (not so_grupos and eh_grupo) else vals
+                linhas.append((c["nome"], vals_exibir, eh_grupo, 1 if so_grupos else 1 + max(0, niv), sep))
                 sep = False
         linhas.append((rotulo, fat(a11.get(chave)), True, 0, sep))
         sep = True
@@ -1235,47 +1232,56 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             novo_divisor(f"{idx}. {item['texto']}")
 
         if role == "prestacao":
-            # Inadimplencia e Resumo Financeiro (16B) nao dependem do 11A; so os slides do 11A precisam dele.
             a11 = dados.get("a11")
             if a11:
-                meses = a11["months"][-12:]
-                offset = len(a11["months"]) - len(meses)
-                periodo_11a = _periodo_meses(meses)
+                todos_meses = a11["months"]
+                periodo_11a = _periodo_meses(todos_meses)
+                n_chunks = max(1, -(-len(todos_meses) // 12))
 
-                def fatiar(arr):
-                    return (arr[offset:] if arr else [None] * len(meses))
+                for ch in range(n_chunks):
+                    offset = ch * 12
+                    meses = todos_meses[offset:offset + 12]
+                    suf_col = f" — {meses[0]} a {meses[-1]}" if n_chunks > 1 else ""
 
-                if a11.get("contasPlano"):
-                    col_w_res = [PLANO_COL_DESC] + [(17.4 - PLANO_COL_DESC) / len(meses)] * len(meses)
-                    # 1o o resumo so com grupos/subgrupos, depois o detalhamento completo (com as contas-folha)
-                    for so_grupos, titulo_res in ((True, "Prestação de contas — Resumo"), (False, "Prestação de contas")):
-                        linhas_res = _linhas_resumo(a11, offset, len(meses), so_grupos)
-                        chave_res = "resumo-grupos" if so_grupos else "resumo"
-                        faixas_res, _l = _paginar_tabela(len(linhas_res), "meses", chave_res, dados.get("ajustes"))
-                        pags_res = len(faixas_res)
-                        for pr, (i0, i1) in enumerate(faixas_res):
-                            lote_r = linhas_res[i0:i1]
-                            rows_r = [[(("   " * niv) + nome, neg)] + [(fmt_brl(v), neg) for v in vals] for nome, vals, neg, niv, _sp in lote_r]
-                            seps_r = {i for i, l in enumerate(lote_r) if l[4]}
-                            grande_r = len(lote_r) + 1 <= TIPOS_TABELA["meses"]["grande"]
-                            fonte_r, altura_r = _layout_tabela("meses", len(lote_r))
-                            sr = novo_conteudo(titulo_res + (f" ({pr+1}/{pags_res})" if pags_res > 1 else ""))
-                            add_table(sr, Inches(1.3), ["Categoria"] + meses, rows_r, col_w_res, font_size=min(fonte_r, _fonte_tabela_meses(rows_r, grande_r)),
-                                      height_in=altura_r, y=Inches(1.9), margin_v=0.04, margin_h=0.04, sep_rows=seps_r)
-                            add_periodo(sr, periodo_11a)
-                else:
-                    s = novo_conteudo("Prestação de contas")
-                    add_periodo(s, periodo_11a)
-                    tbl_rows = [
-                        [("Saldo anterior", False)] + [fmt_brl(v) for v in fatiar(a11["saldoAnterior"])],
-                        [("Total de Receitas", True)] + [fmt_brl(v) for v in fatiar(a11["totalReceitas"])],
-                        [("Total de Despesas", True)] + [fmt_brl(v) for v in fatiar(a11["totalDespesas"])],
-                        [("Saldo Final", True)] + [fmt_brl(v) for v in fatiar(a11["saldoFinal"])],
-                    ]
-                    add_table(s, Inches(1.3), [""] + meses, tbl_rows, [2.6] + [(17.4 - 2.6) / len(meses)] * len(meses), font_size=13, height_in=0.8, y=Inches(3.4))
+                    def fatiar(arr):
+                        return (arr[offset:offset + len(meses)] if arr else [None] * len(meses))
 
-                rec_v = [v or 0 for v in fatiar(a11["totalReceitas"])]
-                desp_v = [v or 0 for v in fatiar(a11["totalDespesas"])]
+                    if a11.get("contasPlano"):
+                        col_w_res = [PLANO_COL_DESC] + [(17.4 - PLANO_COL_DESC) / len(meses)] * len(meses)
+                        for so_grupos, titulo_res in ((True, "Prestação de contas — Resumo"), (False, "Prestação de contas")):
+                            linhas_res = _linhas_resumo(a11, offset, len(meses), so_grupos)
+                            chave_res = "resumo-grupos" if so_grupos else "resumo"
+                            faixas_res, _l = _paginar_tabela(len(linhas_res), "meses", chave_res, dados.get("ajustes"))
+                            pags_res = len(faixas_res)
+                            for pr, (i0, i1) in enumerate(faixas_res):
+                                lote_r = linhas_res[i0:i1]
+                                rows_r = []
+                                for nome, vals, neg, niv, _sp in lote_r:
+                                    if vals is None:
+                                        rows_r.append([(("   " * niv) + nome, neg)] + [""] * len(meses))
+                                    else:
+                                        rows_r.append([(("   " * niv) + nome, neg)] + [(fmt_brl(v), neg) for v in vals])
+                                seps_r = {i for i, l in enumerate(lote_r) if l[4]}
+                                grande_r = len(lote_r) + 1 <= TIPOS_TABELA["meses"]["grande"]
+                                fonte_r, altura_r = _layout_tabela("meses", len(lote_r))
+                                sr = novo_conteudo(titulo_res + suf_col + (f" ({pr+1}/{pags_res})" if pags_res > 1 else ""))
+                                add_table(sr, Inches(1.3), ["Categoria"] + meses, rows_r, col_w_res, font_size=min(fonte_r, _fonte_tabela_meses(rows_r, grande_r)),
+                                          height_in=altura_r, y=Inches(1.9), margin_v=0.04, margin_h=0.04, sep_rows=seps_r)
+                                add_periodo(sr, periodo_11a)
+                    else:
+                        s = novo_conteudo("Prestação de contas" + suf_col)
+                        add_periodo(s, periodo_11a)
+                        tbl_rows = [
+                            [("Saldo anterior", False)] + [fmt_brl(v) for v in fatiar(a11["saldoAnterior"])],
+                            [("Total de Receitas", True)] + [fmt_brl(v) for v in fatiar(a11["totalReceitas"])],
+                            [("Total de Despesas", True)] + [fmt_brl(v) for v in fatiar(a11["totalDespesas"])],
+                            [("Saldo Final", True)] + [fmt_brl(v) for v in fatiar(a11["saldoFinal"])],
+                        ]
+                        add_table(s, Inches(1.3), [""] + meses, tbl_rows, [2.6] + [(17.4 - 2.6) / len(meses)] * len(meses), font_size=13, height_in=0.8, y=Inches(3.4))
+
+                meses = todos_meses
+                rec_v = [v or 0 for v in a11["totalReceitas"]]
+                desp_v = [v or 0 for v in a11["totalDespesas"]]
                 ref_max = max(rec_v + desp_v + [0])
                 n_pag_barras = (len(meses) + BARRAS_MESES_POR_SLIDE - 1) // BARRAS_MESES_POR_SLIDE
                 for pb in range(n_pag_barras):

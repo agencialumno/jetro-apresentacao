@@ -120,9 +120,19 @@
 <!-- STEP 2 -->
 <div class="card" id="step2">
   <h2><span class="num">2</span> Relatório 11A — Demonstrativo de Receitas e Despesas</h2>
-  <p class="sub">Busca automática direto da Superlógica (últimos 12 meses, incluindo saldo anterior/final das contas bancárias) — ou envie o .xlsx manualmente</p>
+  <p class="sub">Busca automática direto da Superlógica (escolha o período, incluindo saldo anterior/final das contas bancárias) — ou envie o .xlsx manualmente</p>
   <div class="body">
-    <button type="button" class="primary" id="btnBuscar11a" style="width:auto;padding:9px 16px;font-size:13px;" disabled>Buscar automaticamente (últimos 12 meses)</button>
+    <div class="row" style="margin-bottom:10px;">
+      <div>
+        <label for="f_11a_mes_ini">Mês/ano início</label>
+        <input type="month" id="f_11a_mes_ini">
+      </div>
+      <div>
+        <label for="f_11a_mes_fim">Mês/ano fim</label>
+        <input type="month" id="f_11a_mes_fim">
+      </div>
+    </div>
+    <button type="button" class="primary" id="btnBuscar11a" style="width:auto;padding:9px 16px;font-size:13px;" disabled>Buscar automaticamente</button>
     <div class="status-line" id="status11a"></div>
     <div id="preview11a"></div>
     <details style="margin-top:14px;">

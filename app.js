@@ -192,14 +192,13 @@ function parse11A(workbook) {
 
   if (!rows.length) throw new Error("Planilha vazia.");
 
-  // encontra a linha de cabeçalho com os meses (primeira linha com 2+ células tipo "Mmm/AAAA")
   let headerRowIdx = -1;
   let months = [];
   const monthRe = /^[A-Za-zçÇ]{3}\/\d{4}$/;
-  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+  for (let i = 0; i < Math.min(rows.length, 12); i++) {
     const r = rows[i];
     const found = r.filter((c) => typeof c === "string" && monthRe.test(c.trim()));
-    if (found.length >= 3) {
+    if (found.length >= 2) {
       headerRowIdx = i;
       months = r.map((c) => (typeof c === "string" ? c.trim() : null));
       break;
@@ -209,10 +208,20 @@ function parse11A(workbook) {
     throw new Error("Não encontrei a linha com os meses (ex: Dez/2025) no arquivo 11A.");
   }
 
-  const data = {}; // chave: "secao:Rótulo" -> array de valores alinhado a months[]
-  const flatLatest = {}; // chave: "secao:Rótulo" -> último valor sobrescreve (fallback sem seção)
-  let section = null; // 'receitas' | 'despesas' | null (antes de Receitas)
-  const rootRows = {}; // Saldo anterior / Saldo Final (fora de seção)
+  const monthCols = [];
+  for (let c = 1; c < months.length; c++) {
+    if (months[c] && monthRe.test(months[c])) monthCols.push(c);
+  }
+  const monthsClean = monthCols.map((c) => months[c]);
+  const nMeses = monthsClean.length;
+
+  const data = {};
+  let section = null;
+  const rootRows = {};
+  const contasPlano = [];
+  let grupoAtual = null;
+
+  function normLabel(x) { return String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim(); }
 
   for (let i = headerRowIdx + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -220,81 +229,107 @@ function parse11A(workbook) {
     if (label === null || label === undefined || String(label).trim() === "") continue;
     const labelTrim = String(label).trim();
 
-    if (/^receitas$/i.test(labelTrim)) { section = "receitas"; continue; }
-    if (/^despesas$/i.test(labelTrim)) { section = "despesas"; continue; }
+    if (/^receitas$/i.test(labelTrim)) { section = "receitas"; grupoAtual = null; continue; }
+    if (/^despesas$/i.test(labelTrim)) { section = "despesas"; grupoAtual = null; continue; }
+    if (/^mov\.?\s*l[íi]quido/i.test(labelTrim)) { section = null; grupoAtual = null; continue; }
 
-    // "Saldo anterior" e "Saldo Final" ficam fora das seções de Receitas/Despesas
-    // (a 2ª aparece no fim do relatório, já dentro da seção Despesas)
+    const vals = monthCols.map((c) => parseBRNumber(r[c]));
+    const todosVazios = vals.every((v) => v === null || v === undefined);
+
     if (/^saldo (anterior|final)$/i.test(labelTrim)) {
-      const vals = [];
-      for (let c = 1; c < months.length; c++) {
-        if (!months[c]) { vals.push(undefined); continue; }
-        vals.push(parseBRNumber(r[c]));
-      }
+      rootRows[/^saldo anterior$/i.test(labelTrim) ? "Saldo anterior" : "Saldo Final"] = vals;
+      continue;
+    }
+
+    if (section === null) {
       rootRows[labelTrim] = vals;
       continue;
     }
 
-    const values = [];
-    for (let c = 1; c < months.length; c++) {
-      if (!months[c]) { values.push(undefined); continue; }
-      values.push(parseBRNumber(r[c]));
+    if (/^total de (receitas|despesas)$/i.test(labelTrim)) {
+      data[section + ":" + (/receitas/i.test(labelTrim) ? "Total de Receitas" : "Total de Despesas")] = vals;
+      grupoAtual = null;
+      continue;
     }
 
-    if (section === null) {
-      rootRows[labelTrim] = values;
-    } else {
-      const key = section + ":" + labelTrim;
-      data[key] = values;
-      flatLatest[labelTrim] = values; // último que aparecer (usado como fallback)
+    // Linha de subtotal de grupo (ex: "Total de Com Pessoal")
+    if (/^total de /i.test(labelTrim)) {
+      if (grupoAtual) {
+        grupoAtual.valores = vals.map((v) => v || 0);
+        grupoAtual = null;
+      }
+      continue;
     }
+
+    // Cabeçalho de grupo sem valores na linha (ex: "Com Pessoal", "Mensais", "IMPOSTOS")
+    if (todosVazios) {
+      grupoAtual = {
+        conta: (section === "receitas" ? "1." : "2.") + (contasPlano.length + 1),
+        nome: labelTrim,
+        nivel: 0,
+        natureza: "0",
+        secao: section,
+        valores: new Array(nMeses).fill(0),
+      };
+      contasPlano.push(grupoAtual);
+      continue;
+    }
+
+    const key = section + ":" + labelTrim;
+    data[key] = vals;
+
+    const valsNum = vals.map((v) => v || 0);
+    if (grupoAtual) {
+      for (let m = 0; m < nMeses; m++) grupoAtual.valores[m] += valsNum[m];
+    }
+    contasPlano.push({
+      conta: (grupoAtual ? grupoAtual.conta + "." : (section === "receitas" ? "1." : "2.")) + (contasPlano.length + 1),
+      nome: labelTrim,
+      nivel: grupoAtual ? 1 : 0,
+      natureza: section === "receitas" ? "1" : "2",
+      secao: section,
+      valores: valsNum,
+    });
   }
 
-  const monthsClean = months.filter((m) => m);
-
-  function normLabel(x) { return x.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim(); }
   function getSeries(sectionKey, ...labels) {
-    // aceita variações de acento/caixa ("Água e Esgoto" x "Agua e esgoto") e rótulos alternativos
     for (const label of labels) {
       const alvo = sectionKey + ":" + normLabel(label);
       const key = Object.keys(data).find((k) => {
-        const i = k.indexOf(":");
-        return k.slice(0, i) + ":" + normLabel(k.slice(i + 1)) === alvo;
+        const idx = k.indexOf(":");
+        return k.slice(0, idx) + ":" + normLabel(k.slice(idx + 1)) === alvo;
       });
-      if (key) return data[key].filter((v, idx) => months[idx + 1]);
+      if (key) return data[key];
     }
     return null;
-  }
-  function getRoot(label) {
-    return rootRows[label] ? rootRows[label].filter((v, idx) => months[idx + 1]) : null;
   }
 
   const categoriasDetalhadas = Object.keys(data)
     .filter((key) => !/:Total de (Receitas|Despesas)$/i.test(key))
     .map((key) => {
       const idx = key.indexOf(":");
-      const secao = key.slice(0, idx);
-      const label = key.slice(idx + 1);
-      return { secao, label, valores: data[key].filter((v, i) => months[i + 1]) };
+      return { secao: key.slice(0, idx), label: key.slice(idx + 1), valores: data[key] };
     })
     .sort((a, b) => a.label.localeCompare(b.label, "pt-BR"));
 
-  const result = {
-    months: monthsClean,
-    saldoAnterior: getRoot("Saldo anterior"),
-    saldoFinal: getRoot("Saldo Final"),
-    totalReceitas: getSeries("receitas", "Total de Receitas"),
-    totalDespesas: getSeries("despesas", "Total de Despesas"),
-    energiaEletrica: getSeries("despesas", "Energia Elétrica"),
-    aguaEsgotoDespesa: getSeries("despesas", "Agua e esgoto", "Agua/Esgoto"),
-    categoriasDetalhadas,
-  };
+  const totalReceitas = getSeries("receitas", "Total de Receitas");
+  const totalDespesas = getSeries("despesas", "Total de Despesas");
 
-  if (!result.totalReceitas || !result.totalDespesas) {
+  if (!totalReceitas || !totalDespesas) {
     throw new Error('Não encontrei as linhas "Total de Receitas" / "Total de Despesas" no arquivo.');
   }
 
-  return result;
+  return {
+    months: monthsClean,
+    contasPlano: contasPlano.filter((c) => c.valores.some((v) => v)),
+    saldoAnterior: rootRows["Saldo anterior"] || new Array(nMeses).fill(null),
+    saldoFinal: rootRows["Saldo Final"] || new Array(nMeses).fill(null),
+    totalReceitas,
+    totalDespesas,
+    energiaEletrica: getSeries("despesas", "Energia Elétrica"),
+    aguaEsgotoDespesa: getSeries("despesas", "Agua e esgoto", "Agua/Esgoto", "Água"),
+    categoriasDetalhadas,
+  };
 }
 
 /* ===================== PARSER: Previsão Orçamentária ===================== */
@@ -915,16 +950,30 @@ function parseBalanceteMes(apiResponse) {
   const itens = apiResponse[0].itens.map((arr) => arr[0]).filter(Boolean);
   function num(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
   function semAcento(s) { return (s || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); }
-  let totalReceitas = null, totalDespesas = null, energia = 0, agua = 0, foundEnergia = false, foundAgua = false;
+  let totalReceitas = null, totalDespesas = null, somaRecFolha = 0, somaDespFolha = 0;
+  let energia = 0, agua = 0, foundEnergia = false, foundAgua = false;
+
   itens.forEach((it) => {
     const descOriginal = it.descricaocomcontacategoria || it.descricao || "";
-    const desc = semAcento(descOriginal);
-    if (it.conta === "1") totalReceitas = num(it.valor);
-    if (it.conta === "2") totalDespesas = num(it.valor);
-    if (it.natureza === "2" && /energia/.test(desc)) { energia += num(it.valor); foundEnergia = true; }
-    if (it.natureza === "2" && /agua\s*e\s*esgoto|agua\/esgoto/.test(desc)) { agua += num(it.valor); foundAgua = true; }
+    const desc = semAcento(descOriginal).replace(/^\d[\d.]*\s*/, "").trim();
+    const nat = String(it.natureza || "");
+    const conta = String(it.conta || "").trim();
+
+    if (nat === "0" && !conta.includes(".")) {
+      if (/^receitas?$/i.test(desc) || conta === "1") totalReceitas = num(it.valor);
+      if (/^despesas?$/i.test(desc) || conta === "2") totalDespesas = num(it.valor);
+    }
+    if (nat === "1") somaRecFolha += num(it.valor);
+    if (nat === "2") {
+      somaDespFolha += num(it.valor);
+      if (/energia/.test(desc)) { energia += num(it.valor); foundEnergia = true; }
+      if (/\bagua\b/.test(desc) && !/caixa|limpeza/.test(desc)) { agua += num(it.valor); foundAgua = true; }
+    }
   });
-  // categorias "folha" (natureza 1 = receita, 2 = despesa) — exclui totais e subtotais de grupo (natureza 0)
+
+  if (totalReceitas === null && somaRecFolha > 0) totalReceitas = somaRecFolha;
+  if (totalDespesas === null && somaDespFolha > 0) totalDespesas = somaDespFolha;
+
   const categoriasFolha = itens
     .filter((it) => it.natureza === "1" || it.natureza === "2")
     .map((it) => ({
@@ -939,13 +988,15 @@ function parseBalanceteMes(apiResponse) {
     agua: foundAgua ? agua : null,
     categoriasFolha,
     itensBrutos: itens.map((it) => ({
-      conta: it.conta || "", natureza: it.natureza,
-      nome: (it.descricao || "").trim(), valor: num(it.valor),
+      conta: String(it.conta || "").trim(),
+      natureza: String(it.natureza || ""),
+      nome: (it.descricao || "").replace(/^\d[\d.]*\s*/, "").trim(),
+      valor: num(it.valor),
     })),
   };
 }
 
-/* ===== Plano de contas real do condomínio (hierarquia pelo código da conta) ===== */
+/* ===== Plano de contas real do condomínio (agnóstico a código de conta) ===== */
 const PLANO_CONTAS_CACHE = {};
 
 async function fetchPlanoContas(idCondominio) {
@@ -958,37 +1009,74 @@ async function fetchPlanoContas(idCondominio) {
   return data;
 }
 
-// Junta os itens do 11A de todos os meses numa lista ordenada pelo código da conta (1, 1.1, 1.1.1 ...).
-// O plano de contas completa o nome dos grupos que o 11A não devolveu (sem lançamento no mês): cada
-// grupo ausente é recriado com a soma das contas-folha dele. Contas sem valor em nenhum mês ficam de fora.
-// Resultado: [{ conta, nome, nivel, natureza ("0" grupo | "1" receita | "2" despesa), secao, valores[] }]
 function montarPlanoContas(planoApi, mesesItens) {
   const nomesPlano = {};
-  (planoApi || []).forEach((p) => { nomesPlano[p.st_conta_cont] = (p.st_descricao_cont || "").trim(); });
+  (planoApi || []).forEach((p) => {
+    const cod = String(p.st_conta_cont || "").trim();
+    if (cod && !nomesPlano[cod]) nomesPlano[cod] = (p.st_descricao_cont || "").trim();
+  });
   const n = mesesItens.length;
   const mapa = {};
+  const secaoPorPrefixo = {};
+
+  // Descobre qual prefixo raiz pertence a receitas (natureza "1") e qual pertence a despesas (natureza "2")
+  mesesItens.forEach((itens) => {
+    itens.forEach((it) => {
+      if ((it.natureza === "1" || it.natureza === "2") && it.conta) {
+        const raiz = it.conta.split(".")[0];
+        secaoPorPrefixo[raiz] = it.natureza === "1" ? "receitas" : "despesas";
+      }
+    });
+  });
+
   mesesItens.forEach((itens, i) => {
     itens.forEach((it) => {
-      if (!/^[12](\.\d+)*$/.test(it.conta)) return;
-      if (!mapa[it.conta]) mapa[it.conta] = { conta: it.conta, nome: nomesPlano[it.conta] || it.nome, natureza: it.natureza, valores: new Array(n).fill(null) };
+      if (!/^\d+(\.\d+)*$/.test(it.conta)) return;
+      const raiz = it.conta.split(".")[0];
+      const secao = it.natureza === "1" ? "receitas" : (it.natureza === "2" ? "despesas" : secaoPorPrefixo[raiz]);
+      if (!secao) return;
+      if (!mapa[it.conta]) {
+        mapa[it.conta] = {
+          conta: it.conta,
+          nome: it.nome || nomesPlano[it.conta] || it.conta,
+          natureza: it.natureza,
+          secao,
+          valores: new Array(n).fill(null),
+        };
+      } else if (it.nome && mapa[it.conta].nome === it.conta) {
+        mapa[it.conta].nome = it.nome;
+      }
       mapa[it.conta].valores[i] = it.valor;
     });
   });
+
   const folhas = Object.values(mapa).filter((c) => c.natureza === "1" || c.natureza === "2");
   folhas.forEach((f) => {
     const partes = f.conta.split(".");
     for (let k = 1; k < partes.length; k++) {
       const pai = partes.slice(0, k).join(".");
-      if (!mapa[pai]) mapa[pai] = { conta: pai, nome: nomesPlano[pai] || pai, natureza: "0", valores: new Array(n).fill(null) };
+      if (!mapa[pai]) {
+        mapa[pai] = { conta: pai, nome: nomesPlano[pai] || pai, natureza: "0", secao: f.secao, valores: new Array(n).fill(null) };
+      }
     }
   });
-  // grupo sem valor num mês (ausente no 11A daquele mês) = soma das contas-folha dele naquele mês
+
   Object.values(mapa).filter((c) => c.natureza === "0").forEach((g) => {
     for (let i = 0; i < n; i++) {
       if (g.valores[i] !== null) continue;
       g.valores[i] = folhas.filter((x) => x.conta.indexOf(g.conta + ".") === 0).reduce((t, x) => t + (x.valores[i] || 0), 0);
     }
   });
+
+  // Remove a conta raiz única de cada seção (ex: "1 - Receitas" e "2 - Despesas") para não duplicar o total da seção
+  ["receitas", "despesas"].forEach((sec) => {
+    const daSec = Object.values(mapa).filter((c) => c.secao === sec);
+    const raizes = daSec.filter((c) => !c.conta.includes("."));
+    if (raizes.length === 1 && raizes[0].natureza === "0") {
+      delete mapa[raizes[0].conta];
+    }
+  });
+
   const cmp = (a, b) => {
     const A = a.split(".").map(Number), B = b.split(".").map(Number);
     for (let i = 0; i < Math.max(A.length, B.length); i++) {
@@ -1000,8 +1088,12 @@ function montarPlanoContas(planoApi, mesesItens) {
     .filter((c) => c.valores.some((v) => v))
     .sort((a, b) => cmp(a.conta, b.conta))
     .map((c) => ({
-      conta: c.conta, nome: c.nome, nivel: c.conta.split(".").length - 1, natureza: c.natureza,
-      secao: c.conta.charAt(0) === "1" ? "receitas" : "despesas", valores: c.valores,
+      conta: c.conta,
+      nome: c.nome,
+      nivel: Math.max(0, c.conta.split(".").length - 2),
+      natureza: c.natureza,
+      secao: c.secao,
+      valores: c.valores,
     }));
 }
 
@@ -1083,6 +1175,21 @@ async function fetchSaldoConsolidado(contas, idCondominio, dataRefMMDDAAAA, ateA
   return algumEncontrado ? total : null;
 }
 
+(function initPeriodo11A() {
+  const elIni = document.getElementById("f_11a_mes_ini");
+  const elFim = document.getElementById("f_11a_mes_fim");
+  if (!elIni || !elFim) return;
+  const hoje = new Date();
+  let mFim = hoje.getMonth();
+  let yFim = hoje.getFullYear();
+  if (mFim === 0) { mFim = 12; yFim -= 1; }
+  let mIni = mFim - 11;
+  let yIni = yFim;
+  if (mIni <= 0) { mIni += 12; yIni -= 1; }
+  elIni.value = yIni + "-" + pad2(mIni);
+  elFim.value = yFim + "-" + pad2(mFim);
+})();
+
 async function buscar11aAutomatico() {
   const idCondominio = document.getElementById("f_condominio_id").value;
   if (!idCondominio) { reportError("status11a", "Falta selecionar o condomínio", "Selecione um condomínio da lista de busca (aba 'Dados da assembleia') antes de buscar.", "Vá até a primeira aba, digite o nome do condomínio no campo de busca e escolha um item da lista que aparecer."); return; }
@@ -1092,17 +1199,29 @@ async function buscar11aAutomatico() {
   btn.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
   setStatus("status11a", true, "Buscando os últimos 12 meses na Superlógica...");
 
-  const hoje = new Date();
-  let mesRef = hoje.getMonth(); // mês anterior ao atual (getMonth() é 0-indexed, então já aponta pro mês passado em base 1)
-  let anoRef = hoje.getFullYear();
-  if (mesRef === 0) { mesRef = 12; anoRef -= 1; }
+  const valIni = document.getElementById("f_11a_mes_ini")?.value || "";
+  const valFim = document.getElementById("f_11a_mes_fim")?.value || "";
+  if (!valIni || !valFim) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    reportError("status11a", "Falta o período", "Informe o mês/ano de início e fim antes de buscar.", "Preencha os dois campos de período no topo desta aba.");
+    return;
+  }
+  const [yIni, mIni] = valIni.split("-").map(Number);
+  const [yFim, mFim] = valFim.split("-").map(Number);
+  if (yIni * 12 + mIni > yFim * 12 + mFim) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    reportError("status11a", "Período inválido", "O mês/ano inicial não pode ser maior que o mês/ano final.", "Ajuste as datas do período.");
+    return;
+  }
 
   const periodos = [];
-  let m = mesRef, y = anoRef;
-  for (let i = 0; i < 12; i++) {
-    periodos.unshift({ mes: m, ano: y });
-    m -= 1;
-    if (m === 0) { m = 12; y -= 1; }
+  let m = mIni, y = yIni;
+  while (y * 12 + m <= yFim * 12 + mFim && periodos.length < 36) {
+    periodos.push({ mes: m, ano: y });
+    m += 1;
+    if (m === 13) { m = 1; y += 1; }
   }
 
   const months = [], totalReceitas = [], totalDespesas = [], energiaEletrica = [], aguaEsgotoDespesa = [], saldoAnterior = [], saldoFinal = [];
@@ -1160,7 +1279,7 @@ async function buscar11aAutomatico() {
         saldoAnterior.push(null);
         saldoFinal.push(null);
       }
-      setStatus("status11a", true, "Buscando... " + months.length + "/12 meses (" + months[months.length - 1] + ")");
+      setStatus("status11a", true, "Buscando... " + months.length + "/" + periodos.length + " meses (" + months[months.length - 1] + ")");
     }
 
     let contasPlano = null;
@@ -1185,7 +1304,7 @@ async function buscar11aAutomatico() {
     const msgSaldo = saldoDisponivel
       ? "Saldo anterior/final também buscados das contas bancárias."
       : "Não achei contas bancárias ativas para esse condomínio — saldo anterior/final seguem manuais.";
-    setStatus("status11a", true, "12 meses buscados automaticamente (" + months[0] + " a " + months[months.length - 1] + "). " + msgSaldo);
+    setStatus("status11a", true, months.length + " meses buscados automaticamente (" + months[0] + " a " + months[months.length - 1] + "). " + msgSaldo);
     renderPreview11A(data);
     if (typeof refreshPreview === "function") refreshPreview();
   } catch (err) {
@@ -2851,7 +2970,7 @@ function linhas16B(b16) {
   return L;
 }
 function linhasResumo(a11, offset, nMeses, soGrupos) {
-  const fat = (arr) => (arr ? arr.slice(offset) : new Array(nMeses).fill(null));
+  const fat = (arr) => (arr ? arr.slice(offset, offset + nMeses) : new Array(nMeses).fill(null));
   const contas = a11.contasPlano || [];
   const linhas = [["Saldo anterior", fat(a11.saldoAnterior), false, 0, false]];
   let sepProx = true; // a próxima linha abre um novo bloco (Receitas | Despesas | Saldo final)
@@ -2862,10 +2981,14 @@ function linhasResumo(a11, offset, nMeses, soGrupos) {
     const raizes = daSecao.filter((c) => (c.nivel || 0) === 0);
     const nivelAlvo = raizes.length === 1 && raizes[0].natureza === "0" && niveis.indexOf(1) >= 0 ? 1 : (niveis.length ? Math.min(...niveis) : 0);
     daSecao.forEach((c) => {
-      const vals = c.valores.slice(offset).map((v) => v || 0);
+      const vals = c.valores.slice(offset, offset + nMeses).map((v) => v || 0);
       while (vals.length < nMeses) vals.push(0);
-      vals.length = nMeses;
-      if (vals.some((v) => v) && (!soGrupos || (c.nivel || 0) === nivelAlvo)) { linhas.push([c.nome, vals, c.natureza === "0", soGrupos ? 1 : 1 + Math.max(0, c.nivel || 0), sepProx]); sepProx = false; }
+      const ehGrupo = c.natureza === "0";
+      if (vals.some((v) => v) && (!soGrupos || (c.nivel || 0) === nivelAlvo)) {
+        const valsExibir = (!soGrupos && ehGrupo) ? null : vals;
+        linhas.push([c.nome, valsExibir, ehGrupo, soGrupos ? 1 : 1 + Math.max(0, c.nivel || 0), sepProx]);
+        sepProx = false;
+      }
     });
     linhas.push([rotulo, fat(tot), true, 0, sepProx]);
     sepProx = true;
@@ -2994,35 +3117,39 @@ function buildSlideSpecs() {
     if (item.role === "prestacao") {
       const a11 = PARSED.a11;
       if (a11) {
-        // Tabela e gráficos mostram os mesmos 12 meses do .pptx.
-        const months12 = pvMonthsSlice(a11.months, 12);
-        const months = months12;
-        const offset12 = a11.months.length - months12.length;
-        function sl12(arr) { return arr ? arr.slice(offset12) : months12.map(() => null); }
-        const sl = sl12;
-        if (a11.contasPlano && a11.contasPlano.length) {
-          // 1º o resumo só com grupos/subgrupos, depois o detalhamento com todas as contas (igual ao backend)
-          [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chave]) => {
-            const linhasRes = linhasResumo(a11, offset12, months12.length, soGrupos);
-            const pg = paginarTabela(linhasRes.length, "meses", chave);
-            pg.faixas.forEach(([i0, i1], pr) => {
-              const lote = linhasRes.slice(i0, i1);
-              const grande = lote.length + 1 <= PLANO_LINHAS_GRANDE;
-              const tit = tituloBase + (pg.faixas.length > 1 ? " (" + (pr + 1) + "/" + pg.faixas.length + ")" : "");
-              const lay = layoutTabela("meses", lote.length);
-              const fontePt = Math.min(lay.fontePt, fontePlanoMeses([].concat(...lote.map((l) => l[1].map((v) => fmtBRL(v)))), grande));
-              specs.push({
-                type: "tabela11a", label: tit, titulo: tit, months: months12, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
-                aj: { chave, tipo: "meses", pagina: pr, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: linhasRes.length },
+        const todosMeses = a11.months;
+        const nChunks = Math.max(1, Math.ceil(todosMeses.length / 12));
+        for (let ch = 0; ch < nChunks; ch++) {
+          const offset = ch * 12;
+          const months = todosMeses.slice(offset, offset + 12);
+          const sufCol = nChunks > 1 ? " — " + months[0] + " a " + months[months.length - 1] : "";
+          const sl = (arr) => (arr ? arr.slice(offset, offset + months.length) : months.map(() => null));
+          if (a11.contasPlano && a11.contasPlano.length) {
+            [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chave]) => {
+              const linhasRes = linhasResumo(a11, offset, months.length, soGrupos);
+              const pg = paginarTabela(linhasRes.length, "meses", chave);
+              pg.faixas.forEach(([i0, i1], pr) => {
+                const lote = linhasRes.slice(i0, i1);
+                const grande = lote.length + 1 <= PLANO_LINHAS_GRANDE;
+                const tit = tituloBase + sufCol + (pg.faixas.length > 1 ? " (" + (pr + 1) + "/" + pg.faixas.length + ")" : "");
+                const lay = layoutTabela("meses", lote.length);
+                const valsTexto = [].concat(...lote.filter((l) => l[1] !== null).map((l) => l[1].map((v) => fmtBRL(v))));
+                const fontePt = Math.min(lay.fontePt, fontePlanoMeses(valsTexto, grande));
+                specs.push({
+                  type: "tabela11a", label: tit, titulo: tit, months, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
+                  aj: { chave, tipo: "meses", pagina: pr, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: linhasRes.length },
+                });
               });
             });
-          });
-        } else {
-          specs.push({
-            type: "tabela11a", label: "Prestação de contas", titulo: "Prestação de contas", months: months12,
-            rows: [["Saldo anterior", sl12(a11.saldoAnterior), false, 0], ["Total de Receitas", sl12(a11.totalReceitas), true, 0], ["Total de Despesas", sl12(a11.totalDespesas), true, 0], ["Saldo Final", sl12(a11.saldoFinal), true, 0]],
-          });
+          } else {
+            specs.push({
+              type: "tabela11a", label: "Prestação de contas" + sufCol, titulo: "Prestação de contas" + sufCol, months,
+              rows: [["Saldo anterior", sl(a11.saldoAnterior), false, 0], ["Total de Receitas", sl(a11.totalReceitas), true, 0], ["Total de Despesas", sl(a11.totalDespesas), true, 0], ["Saldo Final", sl(a11.saldoFinal), true, 0]],
+            });
+          }
         }
+        const months = todosMeses;
+        const sl = (arr) => (arr ? arr.slice() : months.map(() => null));
         // Barras: 6 meses por slide (igual ao backend) pra o rótulo de 14pt caber; mesma escala nas duas páginas
         {
           const rec = sl(a11.totalReceitas).map((v) => v || 0), desp = sl(a11.totalDespesas).map((v) => v || 0);
@@ -3173,9 +3300,9 @@ function buildSlideSpecs() {
     }
   });
 
-  // Período do relatório no cabeçalho dos slides que vêm dele (11A: meses exibidos; 16B: datas do extrato)
+// Período do relatório no cabeçalho dos slides que vêm dele (11A: meses exibidos; 16B: datas do extrato)
   {
-    const a11p = PARSED.a11, p11 = a11p ? periodoMeses(pvMonthsSlice(a11p.months, 12)) : "";
+    const a11p = PARSED.a11, p11 = a11p ? periodoMeses(a11p.months) : "";
     const p16 = PARSED.b16 ? periodo16B(document.getElementById("f_16b_periodo").value.trim()) : "";
     specs.forEach((sp) => {
       if ((sp.type === "tabela11a" || sp.type === "chart") && p11) sp.periodo = p11;
@@ -3310,8 +3437,10 @@ function renderSlideHtmlBase(spec) {
       let t = '<table class="pv-table fin12' + (comSub ? " plano12 ajuste" : "") + '"' + estilo + '><colgroup><col style="width:' + wRot + '%;">' + spec.months.map(() => '<col style="width:' + wMes + '%;">').join("") + '</colgroup>' +
         "<tr><th>" + (comSub ? "Categoria" : "") + "</th>" + spec.months.map((m) => "<th>" + pvEsc(m) + "</th>").join("") + "</tr>";
       spec.rows.forEach(([label, arr, bold, nivel, sep]) => {
-        t += "<tr" + (sep ? ' class="sep"' : "") + "><td" + (bold ? ' class="bold"' : "") + (nivel ? ' style="padding-left:' + (0.5 + nivel * 0.9) + 'cqw;"' : "") + ">" + pvEsc(label) + "</td>" +
-          arr.map((v) => "<td" + (bold ? ' class="bold"' : "") + ">" + fmtBRL(v) + "</td>").join("") + "</tr>";
+        const celulas = arr === null
+          ? spec.months.map(() => "<td></td>").join("")
+          : arr.map((v) => "<td" + (bold ? ' class="bold"' : "") + ">" + fmtBRL(v) + "</td>").join("");
+        t += "<tr" + (sep ? ' class="sep"' : "") + "><td" + (bold ? ' class="bold"' : "") + (nivel ? ' style="padding-left:' + (0.5 + nivel * 0.9) + 'cqw;"' : "") + ">" + pvEsc(label) + "</td>" + celulas + "</tr>";
       });
       t += "</table>";
       return '<div class="pv-slide"><div class="pv-ct">' + pvEsc(spec.titulo || "Prestação de contas") + '</div><div class="pv-body" style="' + (comSub ? "" : "top:32%;") + '">' + t + "</div></div>";

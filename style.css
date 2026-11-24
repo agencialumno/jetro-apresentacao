@@ -305,7 +305,7 @@ header.top .title p{margin:2px 0 0;font-size:13px;color:var(--muted);}
 
 label{display:block;font-size:13px;font-weight:600;margin:12px 0 5px;}
 label:first-child{margin-top:0;}
-input[type=text], input[type=number], textarea, select{
+input[type=text], input[type=number], input[type=month], input[type=date], input[type=time], textarea, select{
   width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;
   font-size:14px;font-family:inherit;color:var(--text);background:#fff;
 }
