@@ -147,7 +147,7 @@ function parseBRNumber(val) {
   if (typeof val === "number") return val;
   if (typeof val !== "string") return 0;
   let s = val.trim();
-  if (s === "" || /conf\.?\s*consumo/i.test(s)) return null; // valor não numérico
+  if (s === "" || /conf(orme|\.?)\s*(o\s*)?consumo/i.test(s)) return null; // valor não numérico
   s = s.replace(/[R$\s]/g, "");
   // remove separador de milhar '.' e troca decimal ',' por '.'
   const negative = /^\(.*\)$/.test(s);
@@ -664,7 +664,7 @@ function parsePrevisao(workbook, abaEscolhida) {
 // Formata um valor de Atual/Previsto da previsão orçamentária: trata o caso especial
 // "Conf. Consumo" (texto, não numérico) igual ao resto da planilha.
 function formatPOValue(raw) {
-  if (typeof raw === "string" && /conf\.?\s*consumo/i.test(raw)) return "Conf. Consumo";
+  if (typeof raw === "string" && /conf(orme|\.?)\s*(o\s*)?consumo/i.test(raw)) return "Conforme consumo";
   return fmtBRL(parseBRNumber(raw));
 }
 
@@ -1542,14 +1542,14 @@ function poIdxPapel(papel) { return PO_MANUAL.colMeta.findIndex((m) => m && m.pa
 
 function poNumero(txt) {
   if (txt === null || txt === undefined || String(txt).trim() === "") return null;
-  if (/conf\.?\s*consumo/i.test(String(txt))) return null;
+  if (/conf(orme|\.?)\s*(o\s*)?consumo/i.test(String(txt))) return null;
   const n = parseBRNumber(String(txt));
   return n === null || isNaN(n) ? null : n;
 }
 function poValorBruto(txt) {
   const t = (txt === null || txt === undefined) ? "" : String(txt).trim();
   if (t === "") return null;
-  if (/conf\.?\s*consumo/i.test(t)) return "Conf. Consumo";
+  if (/conf(orme|\.?)\s*(o\s*)?consumo/i.test(t)) return "Conforme consumo";
   const n = parseBRNumber(t);
   return n === null || isNaN(n) ? t : n;
 }
@@ -3205,8 +3205,8 @@ function renderSlideHtmlBase(spec) {
         let t = '<div style="flex:1;"><p style="margin:0 0 .8cqw;font-weight:700;font-size:' + cqw(22) + ';color:#1D1339;">' + pvEsc(titulo) + '</p>' +
           '<table class="pv-table" style="font-size:' + cqw(fontePt) + ';"><tr><th style="height:' + alturaCqw + ';">Fração</th><th>Recibo</th><th>Total Rateio</th></tr>';
         bloco.itens.forEach((it) => {
-          const recibo = it.recibo === null || it.recibo === undefined ? "Conf. Consumo" : fmtBRL(it.recibo);
-          const tot = it.total === null || it.total === undefined ? "Conf. Consumo" : fmtBRL(it.total);
+          const recibo = it.recibo === null || it.recibo === undefined ? "Conforme consumo" : fmtBRL(it.recibo);
+          const tot = it.total === null || it.total === undefined ? "Conforme consumo" : fmtBRL(it.total);
           t += '<tr><td style="height:' + alturaCqw + ';">' + pvEsc(it.nome || "") + "</td><td>" + recibo + "</td><td>" + tot + "</td></tr>";
         });
         t += '<tr><td class="bold" style="height:' + alturaCqw + ';">TOTAL</td><td></td><td class="bold">' + fmtBRL(bloco.total) + "</td></tr></table></div>";

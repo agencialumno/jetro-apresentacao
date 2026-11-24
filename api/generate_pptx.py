@@ -1347,7 +1347,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
 
             def _txt_po(v):
                 if isinstance(v, str) and "consumo" in v.lower():
-                    return "Conf. Consumo"
+                    return "Conforme consumo"
                 return fmt_brl(v if isinstance(v, (int, float)) else None)
 
             def _valores_po(it):
@@ -1403,8 +1403,8 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     tf.paragraphs[0].font.color.rgb = DARK_PURPLE
                     rows = []
                     for it in bloco["itens"]:
-                        recibo = "Conf. Consumo" if it.get("recibo") is None else fmt_brl(it.get("recibo"))
-                        total_r = "Conf. Consumo" if it.get("total") is None else fmt_brl(it.get("total"))
+                        recibo = "Conforme consumo" if it.get("recibo") is None else fmt_brl(it.get("recibo"))
+                        total_r = "Conforme consumo" if it.get("total") is None else fmt_brl(it.get("total"))
                         rows.append([it.get("nome", ""), recibo, total_r])
                     rows.append([("TOTAL", True), "", (fmt_brl(bloco.get("total")), True)])
                     add_table(slide_r, x, ["Fração", "Recibo", "Total Rateio"], rows, [3.3, 2.6, 2.6], font_size=fonte_r, height_in=altura_r, y=Inches(2.4))
