@@ -459,8 +459,11 @@ function poImportar3Col(wb, nomeAba) {
   const blocoR = (titulo, papel) => {
     const b = poRateioModelo(titulo);
     b.unidades = unidades;
-    if (iCota >= 0 && iFundoSub >= 0) {
-      b.itens = [{ nome: "Cota Condominial", recibo: "", origem: { linhaId: linhas[iCota].id, papel } }, { nome: "Fundo de Reserva", recibo: "", origem: { linhaId: linhas[iFundoSub].id, papel } }, { nome: "Agua/Esgoto", recibo: "Conf. Consumo" }];
+    const iTotalDesp = linhas.map((l) => l.tipo).lastIndexOf("total");
+    if (iTotalDesp >= 0) {
+      b.itens = [{ nome: "Recibo completo (Cota + Fundo + taxas)", recibo: "", origem: { linhaId: linhas[iTotalDesp].id, papel } }, { nome: "Água / Esgoto", recibo: "Conforme consumo" }];
+    } else if (iCota >= 0 && iFundoSub >= 0) {
+      b.itens = [{ nome: "Cota Condominial", recibo: "", origem: { linhaId: linhas[iCota].id, papel } }, { nome: "Fundo de Reserva", recibo: "", origem: { linhaId: linhas[iFundoSub].id, papel } }, { nome: "Água / Esgoto", recibo: "Conforme consumo" }];
     }
     return b;
   };
@@ -595,18 +598,23 @@ function parsePrevisao(workbook, abaEscolhida) {
     }
     if (headerIdx === -1) return null;
     const heads = (rows[headerIdx] || []).map(prevNorm);
-    let cTotal = -1, cRecibo = -1;
+    let cTotal = -1, cRecibo = -1, cVTotal = -1, cUnid = -1;
+    const colsExtrasRecibo = [];
     heads.forEach((t, c) => {
       if (c === cDesc) return;
       if (/total.*rateio|rateio.*total/i.test(t)) cTotal = c;
-      else if (/^recibo$/i.test(t) && cRecibo < 0) cRecibo = c;
+      else if (/^(v\.?\s*total|total\s*unit|valor\s*total|recibo\s*total|valor\s*final)/i.test(t) && cVTotal < 0) cVTotal = c;
+      else if (/^(recibo|cota)/i.test(t) && cRecibo < 0) cRecibo = c;
+      else if (/^(unid|qtd|quant)/i.test(t) && cUnid < 0) cUnid = c;
+      else if (/fundo|garant|taxa|extra/i.test(t)) colsExtrasRecibo.push(c);
     });
-    if (cRecibo < 0) heads.forEach((t, c) => { if (cRecibo < 0 && /^v\.?\s*total$/i.test(t)) cRecibo = c; });
     if (cTotal < 0) { for (let c = heads.length - 1; c > cDesc; c--) if (heads[c]) { cTotal = c; break; } }
-    if (cRecibo < 0) cRecibo = cDesc + 1;
+    // Prefere o valor unitário final (V. Total) quando existir; senão soma Recibo/Cota + colunas extras (Fundo, etc.)
+    const colUnitPrincipal = cVTotal >= 0 ? cVTotal : (cRecibo >= 0 ? cRecibo : cDesc + 1);
+    const somarExtras = cVTotal < 0 && colsExtrasRecibo.length > 0;
 
     const itens = [];
-    let total = null, reajuste = null, reajusteLabel = null, reajusteIsPercent = false;
+    let total = null, reajuste = null, reajusteLabel = null, reajusteIsPercent = false, somaUnidades = 0;
     let fim = headerIdx;
     for (let i = headerIdx + 1; i < Math.min(headerIdx + 40, rows.length); i++) {
       const nome = cell(rows[i], cDesc);
@@ -614,7 +622,25 @@ function parsePrevisao(workbook, abaEscolhida) {
       const nomeTrim = prevNorm(nome);
       fim = i;
       if (/^total$/i.test(nomeTrim)) { total = parseBRNumber(cell(rows[i], cTotal)); break; }
-      itens.push({ nome: nomeTrim, recibo: parseBRNumber(cell(rows[i], cRecibo)), total: parseBRNumber(cell(rows[i], cTotal)) });
+      let valRecibo = parseBRNumber(cell(rows[i], colUnitPrincipal));
+      if (somarExtras && typeof valRecibo === "number") {
+        colsExtrasRecibo.forEach((ce) => {
+          const ve = parseBRNumber(cell(rows[i], ce));
+          if (typeof ve === "number") valRecibo += ve;
+        });
+      }
+      const valTotal = parseBRNumber(cell(rows[i], cTotal));
+      // Se ainda assim o recibo vier só com a cota mas houver Total Rateio e Unidades, usa Total Rateio / Unidades
+      if (cUnid >= 0) {
+        const u = parseBRNumber(cell(rows[i], cUnid));
+        if (typeof u === "number" && u > 0) {
+          somaUnidades += u;
+          if (cVTotal < 0 && !somarExtras && typeof valTotal === "number" && valTotal > 0) {
+            valRecibo = Math.round((valTotal / u) * 100) / 100;
+          }
+        }
+      }
+      itens.push({ nome: nomeTrim, recibo: valRecibo, total: valTotal });
     }
     // "Reajuste de" (%) / "Diferença" (R$): rótulo de texto em qualquer coluna do bloco; número logo abaixo, na mesma coluna
     for (let i = startIdx; i <= Math.min(fim + 1, rows.length - 1) && reajuste === null; i++) {
@@ -628,7 +654,7 @@ function parsePrevisao(workbook, abaEscolhida) {
         if (reajuste !== null) break;
       }
     }
-    return { itens, total, reajuste, reajusteLabel, reajusteIsPercent };
+    return { itens, total, reajuste, reajusteLabel, reajusteIsPercent, unidades: somaUnidades > 0 ? Math.round(somaUnidades) : null };
   }
 
   const blocos = [];
@@ -1476,6 +1502,9 @@ setupDropzone("dzpo", "filepo", async (file) => {
     document.getElementById("poManual").hidden = true;
     const data = parsePrevisao(wb);
     PARSED.prev = data;
+    const unPlanilha = (data.rateioPrevisto && data.rateioPrevisto.unidades) || (data.rateioAtual && data.rateioAtual.unidades);
+    const elUnPo = document.getElementById("f_po_unidades_total");
+    if (unPlanilha && elUnPo && !elUnPo.value) elUnPo.value = String(unPlanilha);
     poMontarSeletorAba(wb, data.sheetUsed);
     dz.classList.add("ok");
     avisarPO(data.sheetUsed);
@@ -1681,11 +1710,12 @@ function poConstruirDados() {
     rateioPrevisto.reajusteLabel = "Reajuste de";
     rateioPrevisto.reajusteIsPercent = true;
   }
+  const unManual = unP || unA || parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10) || null;
   return {
     sheetUsed: "preenchimento manual", condominioNome: null, categories, itensCompletos,
     colunasValores: PO_MANUAL.colunas.map((n) => (n || "").trim() || "Coluna"),
     totalDespesasAtual: totalFinal ? totalFinal[iReal >= 0 ? iReal : 0] : null, totalDespesasPrevisto: totalFinal && totalFinal[iFut >= 0 ? iFut : 1] !== undefined ? totalFinal[iFut >= 0 ? iFut : 1] : null,
-    rateioAtual, rateioPrevisto,
+    rateioAtual, rateioPrevisto, unidadesTotal: unManual,
   };
 }
 function poAtualizarDados() {
@@ -2367,7 +2397,13 @@ function montarDadosParaBackend() {
     dados.periodo16b = document.getElementById("f_16b_periodo").value.trim();
   }
 
-  if (PARSED.prev) dados.previsao = PARSED.prev;
+  if (PARSED.prev) {
+    const unPo = parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+      || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+      || PARSED.prev.unidadesTotal
+      || null;
+    dados.previsao = Object.assign({}, PARSED.prev, unPo ? { unidadesTotal: unPo } : {});
+  }
 
   return dados;
 }
@@ -2868,6 +2904,61 @@ function calcularDiferencaMediaRateio(prev) {
   return null;
 }
 
+function montarLinhasMediaRateio(prev) {
+  const un = parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+    || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+    || prev.unidadesTotal
+    || (prev.rateioPrevisto && prev.rateioPrevisto.unidades)
+    || (prev.rateioAtual && prev.rateioAtual.unidades)
+    || null;
+  const totA = typeof prev.totalDespesasAtual === "number" ? prev.totalDespesasAtual : (prev.rateioAtual && prev.rateioAtual.total);
+  const totP = typeof prev.totalDespesasPrevisto === "number" ? prev.totalDespesasPrevisto : (prev.rateioPrevisto && prev.rateioPrevisto.total);
+
+  if (un && un > 0 && typeof totA === "number" && typeof totP === "number") {
+    let pagA = null, pagP = null, garA = null, garP = null, funA = null, funP = null;
+    (prev.itensCompletos || []).forEach((it) => {
+      const nm = String(it.nome || "").trim();
+      const va = it.valores && typeof it.valores[0] === "number" ? it.valores[0] : (typeof it.atualRaw === "number" ? it.atualRaw : null);
+      const vp = it.valores && typeof it.valores[1] === "number" ? it.valores[1] : (typeof it.previstoRaw === "number" ? it.previstoRaw : null);
+      if (/^total de pagamentos$/i.test(nm)) { pagA = va; pagP = vp; }
+      else if (/^(garantidora|inadimpl[êe]ncia)/i.test(nm)) { garA = va; garP = vp; }
+      else if (/^fundo de reserva/i.test(nm) && va !== null) { funA = va; funP = vp; }
+    });
+    const rows = [];
+    if (typeof pagA === "number" && typeof pagP === "number") rows.push(["Cota Condominial (média/unid.)", fmtBRL(pagA / un), fmtBRL(pagP / un), fmtBRL((pagP - pagA) / un), false]);
+    if (typeof garA === "number" && typeof garP === "number" && (garA > 0 || garP > 0)) rows.push(["Garantidora (média/unid.)", fmtBRL(garA / un), fmtBRL(garP / un), fmtBRL((garP - garA) / un), false]);
+    if (typeof funA === "number" && typeof funP === "number" && (funA > 0 || funP > 0)) rows.push(["Fundo de Reserva (média/unid.)", fmtBRL(funA / un), fmtBRL(funP / un), fmtBRL((funP - funA) / un), false]);
+    rows.push(["Total médio por unidade (" + un + " unid.)", fmtBRL(totA / un), fmtBRL(totP / un), fmtBRL((totP - totA) / un), true]);
+    return rows;
+  }
+
+  const ra = prev.rateioAtual, rp = prev.rateioPrevisto;
+  const itensA = (ra && ra.itens) || [], itensP = (rp && rp.itens) || [];
+  const ref = itensP.length ? itensP : itensA;
+  const ehFracoes = ref.length >= 2 && !ref.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+  if (!ehFracoes && (itensA.length || itensP.length)) {
+    const rows = [];
+    const nMax = Math.max(itensA.length, itensP.length);
+    for (let i = 0; i < nMax; i++) {
+      const a = itensA[i] || {}, p = itensP[i] || {};
+      const va = a.recibo, vp = p.recibo;
+      rows.push([
+        p.nome || a.nome || ("Item " + (i + 1)),
+        va === null || va === undefined ? "Conforme consumo" : fmtBRL(va),
+        vp === null || vp === undefined ? "Conforme consumo" : fmtBRL(vp),
+        typeof va === "number" && typeof vp === "number" ? fmtBRL(vp - va) : "Conforme consumo",
+        false,
+      ]);
+    }
+    if ((ra && typeof ra.totalRecibo === "number") || (rp && typeof rp.totalRecibo === "number")) {
+      const ta = ra && ra.totalRecibo, tp = rp && rp.totalRecibo;
+      rows.push(["TOTAL POR UNIDADE", fmtBRL(ta), fmtBRL(tp), typeof ta === "number" && typeof tp === "number" ? fmtBRL(tp - ta) : "—", true]);
+    }
+    return rows;
+  }
+  return [];
+}
+
 /* ---------- Monta a lista de slides a partir do que já foi preenchido ---------- */
 function buildSlideSpecs() {
   const specs = [];
@@ -3034,7 +3125,7 @@ function buildSlideSpecs() {
             });
           });
         });
-        // Slide de rateio (igual ao backend): duas tabelas grandes lado a lado + cartões de destaque embaixo
+        // Rateio dividido em 2 slides: 1) Média por unidade; 2) Por fração
         const prevR = PARSED.prev;
         if (prevR.rateioAtual || prevR.rateioPrevisto) {
           const cards = [];
@@ -3042,6 +3133,9 @@ function buildSlideSpecs() {
           [prevR.rateioAtual, prevR.rateioPrevisto].forEach((b) => {
             if (b && b.reajuste !== null && b.reajuste !== undefined && b.reajusteIsPercent) reajustePct = b.reajuste;
           });
+          if (reajustePct === null && prevR.rateioAtual && prevR.rateioPrevisto && prevR.rateioAtual.total > 0 && prevR.rateioPrevisto.total !== null) {
+            reajustePct = (prevR.rateioPrevisto.total / prevR.rateioAtual.total) - 1;
+          }
           if (reajustePct !== null) cards.push(["Reajuste do rateio", (reajustePct * 100).toFixed(2).replace(".", ",") + "%"]);
 
           const diffMedia = calcularDiferencaMediaRateio(prevR);
@@ -3050,7 +3144,17 @@ function buildSlideSpecs() {
           if ((prevR.totalDespesasAtual !== null && prevR.totalDespesasAtual !== undefined) || (prevR.totalDespesasPrevisto !== null && prevR.totalDespesasPrevisto !== undefined)) {
             cards.push(["Total de despesas (atual \u2192 previsto)", fmtBRL(prevR.totalDespesasAtual) + " \u2192 " + fmtBRL(prevR.totalDespesasPrevisto)]);
           }
-          specs.push({ type: "rateio", label: "Previsão — Rateio", titulo: "Previsão orçamentária — Rateio", atual: prevR.rateioAtual, previsto: prevR.rateioPrevisto, cards });
+
+          const linhasMedia = montarLinhasMediaRateio(prevR);
+          if (linhasMedia.length) {
+            specs.push({ type: "rateio_media", label: "Rateio — Média por unidade", titulo: "Previsão orçamentária — Rateio (Média por unidade)", linhas: linhasMedia, cards });
+          }
+
+          const refItens = (prevR.rateioPrevisto && prevR.rateioPrevisto.itens) || (prevR.rateioAtual && prevR.rateioAtual.itens) || [];
+          const ehFracoes = refItens.length >= 2 && !refItens.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+          if (ehFracoes || !linhasMedia.length) {
+            specs.push({ type: "rateio", label: "Rateio — Por fração", titulo: "Previsão orçamentária — Rateio por fração", atual: prevR.rateioAtual, previsto: prevR.rateioPrevisto, cards });
+          }
         }
       } else {
         specs.push({ type: "placeholder", label: "Previsão Orçamentária", titulo: "Previsão orçamentária", msg: "Envie a planilha de previsão orçamentária pra ver essa seção" });
@@ -3212,6 +3316,21 @@ function renderSlideHtmlBase(spec) {
       t += "</table>";
       return '<div class="pv-slide"><div class="pv-ct">' + pvEsc(spec.titulo || "Prestação de contas") + '</div><div class="pv-body" style="' + (comSub ? "" : "top:32%;") + '">' + t + "</div></div>";
     }
+
+    case "rateio_media": {
+      let t = '<table class="pv-table mid"><tr><th>Descrição</th><th>Atual (R$)</th><th>Previsto (R$)</th><th>Diferença (R$)</th></tr>';
+      spec.linhas.forEach(([desc, atual, previsto, diff, bold]) => {
+        const cls = bold ? ' class="bold"' : "";
+        t += "<tr><td" + cls + ">" + pvEsc(desc) + "</td><td" + cls + ">" + pvEsc(atual) + "</td><td" + cls + ">" + pvEsc(previsto) + "</td><td" + cls + ">" + pvEsc(diff) + "</td></tr>";
+      });
+      t += "</table>";
+      const cards = spec.cards.length
+        ? '<div class="pv-cards-row" style="position:absolute;left:0;right:0;top:' + ((7.9 - 1.55) * 100 / 20).toFixed(2) + 'cqw;gap:' + (0.4 * 100 / 20) + 'cqw;">' +
+          spec.cards.map(([lbl, val]) => '<div class="pv-stat-card"><div class="val">' + pvEsc(val) + '</div><div class="lbl">' + pvEsc(lbl) + "</div></div>").join("") + "</div>"
+        : "";
+      return '<div class="pv-slide">' + pvHeaderBar(spec.titulo) + '<div class="pv-body pv-rateio" style="top:' + (1.55 * 100 / 11.25).toFixed(2) + '%;">' + t + cards + "</div></div>";
+    }
+
     case "rateio": {
       // Fontes em pt do backend convertidas pra cqw (pt * 0.0694); mesma regra de _dim_tabela (altura da linha cabe entre 2,4" e 7,6").
       const nLinhas = Math.max((spec.atual && spec.atual.itens ? spec.atual.itens.length : 0), (spec.previsto && spec.previsto.itens ? spec.previsto.itens.length : 0)) + 2;
@@ -3929,6 +4048,9 @@ document.getElementById("poAbaSel").addEventListener("change", (e) => {
     PO_MANUAL.importado = false;
     const data = parsePrevisao(PO_WB, e.target.value);
     PARSED.prev = data;
+    const unPlanilha = (data.rateioPrevisto && data.rateioPrevisto.unidades) || (data.rateioAtual && data.rateioAtual.unidades);
+    const elUnPo = document.getElementById("f_po_unidades_total");
+    if (unPlanilha && elUnPo && !elUnPo.value) elUnPo.value = String(unPlanilha);
     avisarCondominio("statuspo", nomeCondominioDoDocumento(linhasIniciaisDaAba(PO_WB, e.target.value)));
     setStatus("statuspo", true, 'lendo aba "' + data.sheetUsed + '"' + (data.condominioNome ? " (" + data.condominioNome + ")" : "") + " — " + data.categories.length + " categorias, total previsto " + fmtBRL(data.totalDespesasPrevisto, true));
     renderPreviewPO(data);
@@ -3950,4 +4072,12 @@ document.getElementById("poAbaSel").addEventListener("change", (e) => {
   });
   sync();
   new MutationObserver(sync).observe(nav, { subtree: true, childList: true, attributes: true, attributeFilter: ["data-label"] });
+})();
+
+(function syncUnidadesCondominio() {
+  const elInad = document.getElementById("f_inad_unidades_total");
+  const elPo = document.getElementById("f_po_unidades_total");
+  if (!elInad || !elPo) return;
+  elInad.addEventListener("input", () => { if (!elPo.dataset.editado) elPo.value = elInad.value; });
+  elPo.addEventListener("input", () => { elPo.dataset.editado = elPo.value ? "1" : ""; });
 })();
