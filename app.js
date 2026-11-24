@@ -575,6 +575,9 @@ function parsePrevisao(workbook, abaEscolhida) {
       if (typeof calc === "number" && calc > 0 && calc < 1) pct = " (" + String(Math.round(calc * 10000) / 100).replace(".", ",") + "%)";
       else if (typeof calc === "string" && calc.trim()) pct = " (" + calc.trim().replace(/\s+/g, " ") + ")";
       itensCompletos.push({ tipo: "item", nome: label + pct, atualRaw: colE, previstoRaw: colF });
+    } else if (/^fundo de reserva/i.test(label) && !semValor) {
+      categories.push({ nome: "Fundo de Reserva", atual: parseBRNumber(colE), previsto: parseBRNumber(colF) });
+      itensCompletos.push({ tipo: "item", nome: label, atualRaw: colE, previstoRaw: colF });
     } else if (/^sub-?total$/i.test(label) && !currentGroupLabel) {
       itensCompletos.push({ tipo: "subtotal", nome: "Sub-Total", atualRaw: colE, previstoRaw: colF });
     } else if (/^total despesas$/i.test(label)) {
@@ -2739,11 +2742,21 @@ function valoresItemPrevisao(it, n) {
   while (v.length < n) v.push(null);
   return v;
 }
-// Igual a _segmentos_previsao no backend: um segmento por grupo + "Resumo" com as linhas fora de grupo.
+// Igual a _segmentos_previsao no backend: um segmento por grupo + "Resumo" com todo o fechamento na ordem da planilha.
 function segmentosPrevisao(itens) {
   const segs = [], resumo = [];
-  let atual = null;
+  let atual = null, emFechamento = false;
   itens.forEach((it) => {
+    if (it.tipo === "subtotal" && /^total de pagamentos$/i.test(String(it.nome || "").trim())) {
+      atual = null;
+      emFechamento = true;
+      resumo.push(it);
+      return;
+    }
+    if (emFechamento) {
+      resumo.push(it);
+      return;
+    }
     if (it.tipo === "grupo") { atual = { nome: it.nome, itens: [] }; segs.push(atual); }
     else if (atual) { atual.itens.push(it); if (it.tipo === "subtotal") atual = null; }
     else resumo.push(it);

@@ -732,11 +732,19 @@ def _grupos_plano(contas, secao, offset, n_meses):
 
 
 def _segmentos_previsao(itens):
-    """Quebra a lista de itens da previsao em [(titulo, [itens])]: um segmento por grupo (a linha do grupo
-    vira o titulo do slide) e um segmento final 'Resumo' com as linhas fora de grupo (Total de pagamentos,
-    Garantidora, Sub-Total, Total despesas). Mesmo algoritmo de segmentosPrevisao em app.js."""
-    segs, resumo, atual = [], [], None
+    """Quebra a lista de itens da previsao em [(titulo, [itens])]: um segmento por grupo e um segmento
+    final 'Resumo' com todo o fechamento (Total de pagamentos, Garantidora, Sub-Total, Fundo de Reserva,
+    Total despesas) na mesma ordem da planilha. Mesmo algoritmo de segmentosPrevisao em app.js."""
+    segs, resumo, atual, em_fechamento = [], [], None, False
     for it in itens:
+        if it.get("tipo") == "subtotal" and re.match(r"^total de pagamentos$", (it.get("nome") or "").strip(), re.I):
+            atual = None
+            em_fechamento = True
+            resumo.append(it)
+            continue
+        if em_fechamento:
+            resumo.append(it)
+            continue
         if it["tipo"] == "grupo":
             atual = [it["nome"], []]
             segs.append(atual)
