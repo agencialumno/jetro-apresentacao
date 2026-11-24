@@ -1232,7 +1232,8 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             novo_divisor(f"{idx}. {item['texto']}")
 
         if role == "prestacao":
-            a11 = dados.get("a11")
+            prefixo_aj = f"{item['extraId']}:" if item.get("extraId") else ""
+            a11 = item.get("a11") or dados.get("a11")
             if a11:
                 todos_meses = a11["months"]
                 periodo_11a = _periodo_meses(todos_meses)
@@ -1250,7 +1251,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                         col_w_res = [PLANO_COL_DESC] + [(17.4 - PLANO_COL_DESC) / len(meses)] * len(meses)
                         for so_grupos, titulo_res in ((True, "Prestação de contas — Resumo"), (False, "Prestação de contas")):
                             linhas_res = _linhas_resumo(a11, offset, len(meses), so_grupos)
-                            chave_res = "resumo-grupos" if so_grupos else "resumo"
+                            chave_res = prefixo_aj + ("resumo-grupos" if so_grupos else "resumo")
                             faixas_res, _l = _paginar_tabela(len(linhas_res), "meses", chave_res, dados.get("ajustes"))
                             pags_res = len(faixas_res)
                             for pr, (i0, i1) in enumerate(faixas_res):
@@ -1311,7 +1312,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 if a11.get("aguaEsgotoDespesa"):
                     _slides_linha("Despesas com Água / Esgoto", "Água / Esgoto", fatiar(a11["aguaEsgotoDespesa"]))
 
-            inad = dados.get("inadimplencia")
+            inad = item.get("inadimplencia") or dados.get("inadimplencia")
             if inad:
                 s5 = novo_conteudo("Inadimplência")
                 if inad.get("posicao"):
@@ -1343,9 +1344,10 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 ]
                 add_table(s5, Inches(1.3), ["Indicador", "Valor"], [[(r[0][0], r[0][1]), (r[1][0], r[1][1])] for r in rows_inad], [13.4, 4.0], font_size=18, height_in=0.7, y=Inches(4.6))
 
-            b16 = dados.get("b16")
+            b16 = item.get("b16") or dados.get("b16")
             if b16:
-                periodo_16 = _periodo_16b(dados.get("periodo16b", ""))
+                periodo_16_raw = item.get("periodo16b") if "periodo16b" in item else dados.get("periodo16b", "")
+                periodo_16 = _periodo_16b(periodo_16_raw)
                 contas16 = b16["contas"]
                 headers16 = ["Conta", "Saldo anterior", "Créditos", "Débitos", "Saldo final"]
                 rows16 = [[c["nome"], fmt_brl(c["saldoAnt"]), fmt_brl(c["creditos"]), fmt_brl(c["debitos"]), (fmt_brl(c["saldoFinal"]), True)] for c in contas16]
@@ -1411,8 +1413,9 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                             nota_txt = [f"{n} lançamento(s) adicional(is) de {nm} não exibidos aqui por limite de tamanho — consulte o extrato completo no sistema." for nm, n in exced]
                         add_bullets(sm, Inches(1.3), nota_txt, y=y_nota, width_in=17.4, height_in=0.5, font_size=14)
 
-        elif role == "previsao" and dados.get("previsao"):
-            prev = dados["previsao"]
+        elif role == "previsao" and (item.get("previsao") or dados.get("previsao")):
+            prefixo_aj = f"{item['extraId']}:" if item.get("extraId") else ""
+            prev = item.get("previsao") or dados.get("previsao")
             itens = prev.get("itensCompletos") or [{"tipo": "subtotal", "nome": c["nome"], "atualRaw": c["atual"], "previstoRaw": c["previsto"]} for c in prev["categories"]]
             LINHAS = PREVISAO_LINHAS_POR_SLIDE
             colunas = [str(c) for c in (prev.get("colunasValores") or ["Atual", "Previsto"])]
@@ -1431,7 +1434,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             w_val = max(2.0, min(3.5, 11.4 / n_cols))
             larguras = [17.4 - w_val * n_cols] + [w_val] * n_cols
 
-            blocos_pv = [{"chave": f"previsao:{_slug(n)}", "nome": n, "itens": its} for n, its in _segmentos_previsao(itens)]
+            blocos_pv = [{"chave": f"{prefixo_aj}previsao:{_slug(n)}", "nome": n, "itens": its} for n, its in _segmentos_previsao(itens)]
             for un in _fundir_blocos(blocos_pv, "previsao", dados.get("ajustes")):
                 nome_seg, itens_seg = un["nomes"][0], un["itens"]
                 faixas_p, _l = _paginar_tabela(len(itens_seg), "previsao", un["chave"], dados.get("ajustes"))

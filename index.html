@@ -30,7 +30,8 @@
     <button type="button" class="nav-btn" data-panel="5" data-label="Inadimplência">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 2 21h20L12 2Z"></path><path d="M12 9v5M12 17h.01"></path></svg>
     </button>
-    <!-- abas dos tópicos da pauta: injetadas pelo app.js (criarSecaoTopico) -->
+    <!-- abas dinâmicas (cópias de prestação/previsão e tópicos da pauta): injetadas pelo app.js -->
+    <div id="dynamicExtraNav" style="display:contents;"></div>
     <div id="dynamicTopicsNav" style="display:contents;"></div>
     <button type="button" class="nav-btn" data-panel="8" data-label="Canais de atendimento">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.7a2 2 0 0 1-.5 2.1L8 9.7a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.7.6a2 2 0 0 1 1.7 2Z"></path></svg>
@@ -105,7 +106,7 @@
 
     <div class="card">
       <h2 style="margin-left:0;">Pauta</h2>
-      <p class="sub" style="margin-left:0;">Arraste para reordenar, edite o texto ou remova qualquer item. Cada tópico novo ganha uma aba própria para o conteúdo do slide. Remover "Prestação de contas" ou "Previsão orçamentária" desativa as abas e os slides correspondentes.</p>
+      <p class="sub" style="margin-left:0;">Arraste para reordenar, edite o texto ou remova qualquer item. Use o botão ⧉ para duplicar Prestação de contas ou Previsão orçamentária na mesma assembleia.</p>
       <div style="margin-left:0;">
         <div id="pautaList"></div>
         <p class="pauta-hint" id="pautaHint"></p>
@@ -119,8 +120,13 @@
 <section class="panel" id="panel-2" data-panel="2">
 <!-- STEP 2 -->
 <div class="card" id="step2">
-  <h2><span class="num">2</span> Relatório 11A — Demonstrativo de Receitas e Despesas</h2>
-  <p class="sub">Busca automática direto da Superlógica (escolha o período, incluindo saldo anterior/final das contas bancárias) — ou envie o .xlsx manualmente</p>
+  <div class="card-head-row">
+    <div>
+      <h2><span class="num">2</span> Relatório 11A — Demonstrativo de Receitas e Despesas</h2>
+      <p class="sub">Busca automática direto da Superlógica (escolha o período, incluindo saldo anterior/final das contas bancárias) — ou envie o .xlsx manualmente</p>
+    </div>
+    <button type="button" class="secondary btn-dup-secao" id="btnDupPrestacao" title="Cria uma nova prestação de contas independente (ex: outro período ou gestão)">⧉ Duplicar prestação de contas</button>
+  </div>
   <div class="body">
     <div class="row" style="margin-bottom:10px;">
       <div>
@@ -149,8 +155,13 @@
 <section class="panel" id="panel-3" data-panel="3">
 <!-- STEP 3 -->
 <div class="card" id="step3">
-  <h2><span class="num">3</span> Previsão Orçamentária</h2>
-  <p class="sub">Planilha .xlsx com o comparativo Atual x Previsto — alimenta os slides de previsão orçamentária</p>
+  <div class="card-head-row">
+    <div>
+      <h2><span class="num">3</span> Previsão Orçamentária</h2>
+      <p class="sub">Planilha .xlsx com o comparativo Atual x Previsto — alimenta os slides de previsão orçamentária</p>
+    </div>
+    <button type="button" class="secondary btn-dup-secao" id="btnDupPrevisao" title="Cria uma nova previsão orçamentária independente (ex: outro cenário ou proposta)">⧉ Duplicar previsão orçamentária</button>
+  </div>
   <div class="body">
     <div class="dropzone" id="dzpo">
       <input type="file" id="filepo" accept=".xlsx,.xls">
@@ -267,7 +278,8 @@
 </div>
 </section>
 
-<!-- seções dos tópicos da pauta: injetadas pelo app.js (criarSecaoTopico) -->
+<!-- painéis dinâmicos: cópias de prestação/previsão e seções dos tópicos da pauta -->
+<div id="dynamicExtraPanels"></div>
 <div id="dynamicTopicsPanels"></div>
 
 <section class="panel" id="panel-8" data-panel="8">

@@ -2308,8 +2308,219 @@ function removerSecaoTopico(topicId) {
 }
 
 /* ---------- Abas estruturais: habilitadas só enquanto o item correspondente está na pauta ---------- */
+/* ---------- Cópias independentes de Prestação de Contas e Previsão Orçamentária ---------- */
+const EXTRA_SECTIONS = {};
+let extraSeq = 0;
+
+function removerSecaoExtra(extraId) {
+  delete EXTRA_SECTIONS[extraId];
+  const btn = document.querySelector('.sidebar nav button[data-panel="extra-' + extraId + '"]');
+  const panel = document.getElementById("panel-extra-" + extraId);
+  const eraAtiva = (btn && btn.classList.contains("active")) || (panel && panel.classList.contains("active"));
+  if (btn) btn.remove();
+  if (panel) panel.remove();
+  const pautaDiv = document.querySelector('#pautaList .repeat-block[data-extra-id="' + extraId + '"]');
+  if (pautaDiv) pautaDiv.remove();
+  updatePautaHint();
+  atualizarAbasEstruturais();
+  if (eraAtiva) switchPanel("1");
+  if (typeof refreshPreview === "function") refreshPreview();
+}
+
+function criarSecaoExtra(role, tituloInicial) {
+  extraSeq += 1;
+  const extraId = "ext" + extraSeq;
+  const nCopia = Object.values(EXTRA_SECTIONS).filter((s) => s.role === role).length + 2;
+  const titulo = (tituloInicial || "").trim() || (role === "prestacao" ? "Prestação de contas (" + nCopia + ")" : "Previsão orçamentária (" + nCopia + ")");
+  EXTRA_SECTIONS[extraId] = { id: extraId, role, a11: null, prev: null };
+
+  const navWrap = document.getElementById("dynamicExtraNav");
+  const panelsWrap = document.getElementById("dynamicExtraPanels");
+  if (navWrap && panelsWrap) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "nav-btn";
+    btn.dataset.panel = "extra-" + extraId;
+    btn.dataset.label = titulo;
+    btn.innerHTML = role === "prestacao"
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 21V9M9 21V3M15 21v-7M21 21V11"></path></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>';
+    navWrap.appendChild(btn);
+
+    const section = document.createElement("section");
+    section.className = "panel";
+    section.id = "panel-extra-" + extraId;
+    section.dataset.panel = "extra-" + extraId;
+
+    if (role === "prestacao") {
+      const defIni = document.getElementById("f_11a_mes_ini")?.value || "";
+      const defFim = document.getElementById("f_11a_mes_fim")?.value || "";
+      const temCond = !!document.getElementById("f_condominio_id")?.value;
+      section.innerHTML =
+        '<div class="card">' +
+        '<div class="card-head-row"><div>' +
+        '<h2 class="extra-title" style="margin-left:0;"></h2>' +
+        '<p class="sub" style="margin-left:0;">Cópia independente do Relatório 11A — escolha o período ou envie o .xlsx correspondente</p>' +
+        '</div><button type="button" class="secondary btn-rm-extra">✕ Remover esta cópia</button></div>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<div class="row" style="margin-bottom:10px;">' +
+        '<div><label>Mês/ano início</label><input type="month" class="ext-11a-ini" value="' + poAttr(defIni) + '"></div>' +
+        '<div><label>Mês/ano fim</label><input type="month" class="ext-11a-fim" value="' + poAttr(defFim) + '"></div>' +
+        '</div>' +
+        '<button type="button" class="primary ext-11a-buscar" style="width:auto;padding:9px 16px;font-size:13px;"' + (temCond ? "" : " disabled") + '>Buscar automaticamente</button>' +
+        '<div class="status-line ext-status"></div>' +
+        '<div class="ext-preview"></div>' +
+        '<details style="margin-top:14px;" open><summary style="cursor:pointer;font-size:12.5px;color:var(--muted);">Ou enviar arquivo .xlsx manualmente</summary>' +
+        '<div class="dropzone ext-dz" style="margin-top:10px;"><input type="file" accept=".xlsx,.xls">Arraste o arquivo .xlsx do relatório 11A aqui, ou clique para selecionar</div>' +
+        '</details></div></div>';
+
+      const stEl = section.querySelector(".ext-status");
+      const pvEl = section.querySelector(".ext-preview");
+      const setSt = (ok, msg) => { stEl.className = "status-line " + (ok ? "ok" : "err"); stEl.innerHTML = '<span class="dot"></span>' + msg; };
+
+      const renderMini11A = (d) => {
+        pvEl.innerHTML = '<p class="hint">Período carregado: <strong>' + pvEsc(d.months[0]) + ' a ' + pvEsc(d.months[d.months.length - 1]) + '</strong> (' + d.months.length + ' meses).</p>';
+      };
+
+      section.querySelector(".ext-11a-buscar").addEventListener("click", async () => {
+        const idCond = document.getElementById("f_condominio_id")?.value;
+        if (!idCond) { showErrorModal("Falta selecionar o condomínio", "Selecione um condomínio na aba 'Dados da assembleia' antes de buscar."); return; }
+        const vIni = section.querySelector(".ext-11a-ini").value;
+        const vFim = section.querySelector(".ext-11a-fim").value;
+        if (!vIni || !vFim) { showErrorModal("Falta o período", "Preencha mês/ano inicial e final."); return; }
+        const [yI, mI] = vIni.split("-").map(Number);
+        const [yF, mF] = vFim.split("-").map(Number);
+        if (yI * 12 + mI > yF * 12 + mF) { showErrorModal("Período inválido", "O mês inicial não pode ser maior que o final."); return; }
+        const btnB = section.querySelector(".ext-11a-buscar");
+        const txtOrig = btnB.textContent;
+        btnB.disabled = true;
+        btnB.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
+        try {
+          const periodos = [];
+          let m = mI, y = yI;
+          while (y * 12 + m <= yF * 12 + mF && periodos.length < 36) { periodos.push({ mes: m, ano: y }); m += 1; if (m === 13) { m = 1; y += 1; } }
+          const months = [], totalReceitas = [], totalDespesas = [], energiaEletrica = [], aguaEsgotoDespesa = [], saldoAnterior = [], saldoFinal = [], mesesItens = [];
+          let contas = [], saldoOk = true;
+          try { contas = await fetchContasBancarias(idCond); if (!contas.length) saldoOk = false; } catch (e) { saldoOk = false; }
+          let saldoAntUlt = null;
+          for (let i = 0; i < periodos.length; i++) {
+            const p = periodos[i];
+            const parsed = parseBalanceteMes(await fetchBalanceteMes(idCond, p.mes, p.ano));
+            months.push(MESES_ABBR[p.mes - 1] + "/" + p.ano);
+            mesesItens.push(parsed ? parsed.itensBrutos : []);
+            totalReceitas.push(parsed ? parsed.totalReceitas : null);
+            totalDespesas.push(parsed ? parsed.totalDespesas : null);
+            energiaEletrica.push(parsed ? parsed.energia : null);
+            aguaEsgotoDespesa.push(parsed ? parsed.agua : null);
+            if (saldoOk) {
+              const sAnt = saldoAntUlt !== null ? saldoAntUlt : await fetchSaldoConsolidado(contas, idCond, pad2(p.mes) + "/01/" + p.ano, 0);
+              const sFim = await fetchSaldoConsolidado(contas, idCond, pad2(p.mes) + "/" + pad2(lastDayOfMonth(p.mes, p.ano)) + "/" + p.ano, 1);
+              saldoAnterior.push(sAnt); saldoFinal.push(sFim); saldoAntUlt = sFim;
+            } else { saldoAnterior.push(null); saldoFinal.push(null); }
+            setSt(true, "Buscando... " + months.length + "/" + periodos.length + " meses");
+          }
+          let contasPlano = null;
+          try { contasPlano = montarPlanoContas(await fetchPlanoContas(idCond), mesesItens); if (!contasPlano.length) contasPlano = null; } catch (e) {}
+          const d = {
+            months, contasPlano, saldoAnterior, saldoFinal, totalReceitas, totalDespesas,
+            energiaEletrica: energiaEletrica.some((v) => v !== null) ? energiaEletrica : null,
+            aguaEsgotoDespesa: aguaEsgotoDespesa.some((v) => v !== null) ? aguaEsgotoDespesa : null,
+            categoriasDetalhadas: [],
+          };
+          EXTRA_SECTIONS[extraId].a11 = d;
+          setSt(true, months.length + " meses buscados (" + months[0] + " a " + months[months.length - 1] + ").");
+          renderMini11A(d);
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) {
+          setSt(false, "Erro ao buscar: " + err.message);
+        } finally { btnB.disabled = false; btnB.textContent = txtOrig; }
+      });
+
+      const dz = section.querySelector(".ext-dz");
+      const inp = dz.querySelector("input");
+      dz.addEventListener("click", () => inp.click());
+      inp.addEventListener("change", async () => {
+        if (!inp.files[0]) return;
+        try {
+          const wb = await readWorkbook(inp.files[0]);
+          const d = parse11A(wb);
+          EXTRA_SECTIONS[extraId].a11 = d;
+          dz.classList.add("ok");
+          dz.textContent = inp.files[0].name;
+          setSt(true, d.months.length + " meses carregados (" + d.months[0] + " a " + d.months[d.months.length - 1] + ")");
+          renderMini11A(d);
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) { setSt(false, "Erro: " + err.message); }
+      });
+    } else {
+      section.innerHTML =
+        '<div class="card">' +
+        '<div class="card-head-row"><div>' +
+        '<h2 class="extra-title" style="margin-left:0;"></h2>' +
+        '<p class="sub" style="margin-left:0;">Cópia independente da Previsão Orçamentária — envie a planilha .xlsx deste cenário</p>' +
+        '</div><button type="button" class="secondary btn-rm-extra">✕ Remover esta cópia</button></div>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<div class="dropzone ext-dz"><input type="file" accept=".xlsx,.xls">Arraste o arquivo .xlsx desta previsão orçamentária aqui, ou clique para selecionar</div>' +
+        '<div class="row" style="margin-top:12px;"><div><label>Total de unidades do condomínio (para média do rateio)</label><input type="number" class="ext-po-un" min="1" step="1" placeholder="Ex: 73"></div><div></div></div>' +
+        '<div class="status-line ext-status"></div>' +
+        '<div class="ext-preview"></div>' +
+        '</div></div>';
+
+      const stEl = section.querySelector(".ext-status");
+      const pvEl = section.querySelector(".ext-preview");
+      const unEl = section.querySelector(".ext-po-un");
+      const setSt = (ok, msg) => { stEl.className = "status-line " + (ok ? "ok" : "err"); stEl.innerHTML = '<span class="dot"></span>' + msg; };
+      unEl.addEventListener("input", () => {
+        EXTRA_SECTIONS[extraId].unidadesTotal = unEl.value;
+        if (typeof refreshPreview === "function") refreshPreview();
+      });
+
+      const dz = section.querySelector(".ext-dz");
+      const inp = dz.querySelector("input");
+      dz.addEventListener("click", () => inp.click());
+      inp.addEventListener("change", async () => {
+        if (!inp.files[0]) return;
+        try {
+          const wb = await readWorkbook(inp.files[0]);
+          const d = parsePrevisao(wb);
+          EXTRA_SECTIONS[extraId].prev = d;
+          const unPlan = (d.rateioPrevisto && d.rateioPrevisto.unidades) || (d.rateioAtual && d.rateioAtual.unidades);
+          if (unPlan && !unEl.value) { unEl.value = String(unPlan); EXTRA_SECTIONS[extraId].unidadesTotal = String(unPlan); }
+          dz.classList.add("ok");
+          dz.textContent = inp.files[0].name;
+          setSt(true, 'Aba "' + d.sheetUsed + '" — ' + d.categories.length + " categorias, total previsto " + fmtBRL(d.totalDespesasPrevisto, true));
+          pvEl.innerHTML = '<p class="hint">Planilha carregada com sucesso (' + d.categories.length + ' categorias).</p>';
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) { setSt(false, "Erro: " + err.message); }
+      });
+    }
+
+    section.querySelector(".extra-title").textContent = titulo;
+    section.querySelector(".btn-rm-extra").addEventListener("click", () => removerSecaoExtra(extraId));
+    panelsWrap.appendChild(section);
+  }
+
+  return { extraId, titulo };
+}
+
+function atualizarRotuloExtra(extraId, label) {
+  const nome = (label || "").trim() || "Cópia";
+  const btn = document.querySelector('.sidebar nav button[data-panel="extra-' + extraId + '"]');
+  if (btn) btn.dataset.label = nome;
+  const tit = document.querySelector("#panel-extra-" + extraId + " .extra-title");
+  if (tit) tit.textContent = nome;
+}
+
+function duplicarSecaoEstrutural(role, tituloBase) {
+  const { extraId, titulo } = criarSecaoExtra(role, tituloBase);
+  addPautaItem(titulo, role, extraId);
+  switchPanel("extra-" + extraId);
+  if (typeof refreshPreview === "function") refreshPreview();
+}
+
 function atualizarAbasEstruturais() {
-  const roles = new Set(getPautaItemsComRole().map((it) => it.role));
+  const itens = getPautaItemsComRole();
+  const roles = new Set(itens.filter((it) => !it.extraId).map((it) => it.role));
   Object.keys(STRUCTURAL_TABS).forEach((role) => {
     const cfg = STRUCTURAL_TABS[role];
     const disponivel = roles.has(role);
@@ -2333,18 +2544,22 @@ function atualizarAbasEstruturais() {
 function updatePautaHint() {
   const total = document.querySelectorAll(".pauta-input").length;
   document.getElementById("pautaHint").textContent =
-    total + " item(ns) na pauta. Arraste para reordenar; qualquer item pode ser editado ou removido.";
+    total + " item(ns) na pauta. Arraste para reordenar; clique em ⧉ para duplicar Prestação de contas ou Previsão orçamentária.";
 }
 
-function addPautaItem(value, role) {
+function addPautaItem(value, role, extraId) {
   role = role || "topico";
   const list = document.getElementById("pautaList");
   const div = document.createElement("div");
   div.className = "repeat-block draggable";
   div.draggable = true;
   div.dataset.role = role;
+  if (extraId) div.dataset.extraId = extraId;
+
+  const podeDuplicar = role === "prestacao" || role === "previsao";
   div.innerHTML = '<span class="drag-handle" title="Arraste para reordenar">⋮⋮</span>' +
     '<input type="text" class="pauta-input" style="flex:1;">' +
+    (podeDuplicar ? '<button type="button" class="secondary dup-pauta" title="Duplicar esta seção (cria uma nova aba independente)">⧉</button>' : "") +
     '<button type="button" class="secondary rm" style="padding:2px 8px;">×</button>';
   const input = div.querySelector(".pauta-input");
   input.value = value || "";
@@ -2357,10 +2572,17 @@ function addPautaItem(value, role) {
 
   input.addEventListener("input", () => {
     if (div.dataset.topicId) atualizarRotuloTopico(div.dataset.topicId, input.value);
+    if (div.dataset.extraId) atualizarRotuloExtra(div.dataset.extraId, input.value);
     atualizarAbasEstruturais();
   });
+  if (podeDuplicar) {
+    div.querySelector(".dup-pauta").addEventListener("click", () => {
+      duplicarSecaoEstrutural(role, (input.value.trim() || "Item") + " (2)");
+    });
+  }
   div.querySelector(".rm").addEventListener("click", () => {
     if (div.dataset.topicId) removerSecaoTopico(div.dataset.topicId);
+    if (div.dataset.extraId) removerSecaoExtra(div.dataset.extraId);
     div.remove();
     updatePautaHint();
     atualizarAbasEstruturais();
@@ -2386,6 +2608,7 @@ function addPautaItem(value, role) {
 
 function resetPautaList() {
   document.querySelectorAll("#pautaList .repeat-block[data-topic-id]").forEach((div) => removerSecaoTopico(div.dataset.topicId));
+  Object.keys(EXTRA_SECTIONS).forEach((id) => removerSecaoExtra(id));
   document.getElementById("pautaList").innerHTML = "";
   DEFAULT_PAUTA.forEach((item) => addPautaItem(item.text, item.role));
 }
@@ -2469,6 +2692,21 @@ function getPautaItemsComRole() {
       const el = lerEleicao(div.dataset.topicId);
       if (el) item.eleicao = el;
     }
+    if (div.dataset.extraId) {
+      item.extraId = div.dataset.extraId;
+      const sec = EXTRA_SECTIONS[div.dataset.extraId];
+      if (sec) {
+        if (item.role === "prestacao" && sec.a11) item.a11 = sec.a11;
+        if (item.role === "previsao" && sec.prev) {
+          const un = parseInt(sec.unidadesTotal || "", 10)
+            || parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+            || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+            || sec.prev.unidadesTotal
+            || null;
+          item.previsao = Object.assign({}, sec.prev, un ? { unidadesTotal: un } : {});
+        }
+      }
+    }
     return item;
   }).filter((it) => it.texto);
 }
@@ -2542,13 +2780,15 @@ async function gerarApresentacaoModelo() {
     reportError("genMsg", "Pauta vazia", "A pauta não tem nenhum item com texto.", "Volte na aba \"Dados da assembleia\" e adicione ou preencha pelo menos um item da pauta.");
     return;
   }
-  // Os relatórios só são exigidos se o item correspondente ainda está na pauta.
-  if (pauta.some((it) => it.role === "prestacao") && !PARSED.a11) {
-    reportError("genMsg", "Falta o relatório 11A", "O relatório 11A ainda não foi buscado nem enviado.", "Vá na aba \"Relatório 11A\" e clique em buscar automaticamente, ou envie o arquivo .xlsx manualmente. Se não quiser a prestação de contas, remova esse item da pauta.");
+  // Os relatórios só são exigidos se o item correspondente ainda está na pauta (incluindo cópias).
+  const faltaPrest = pauta.find((it) => it.role === "prestacao" && !(it.a11 || PARSED.a11));
+  if (faltaPrest) {
+    reportError("genMsg", "Falta o relatório 11A", 'Falta buscar ou enviar o relatório 11A de "' + faltaPrest.texto + '".', "Abra a aba correspondente e clique em buscar automaticamente ou envie o arquivo .xlsx.");
     return;
   }
-  if (pauta.some((it) => it.role === "previsao") && !PARSED.prev) {
-    reportError("genMsg", "Falta a Previsão Orçamentária", "A planilha de previsão orçamentária ainda não foi enviada.", "Vá na aba \"Previsão Orçamentária\" e envie o arquivo .xlsx. Se não quiser a previsão orçamentária, remova esse item da pauta.");
+  const faltaPrev = pauta.find((it) => it.role === "previsao" && !(it.previsao || PARSED.prev));
+  if (faltaPrev) {
+    reportError("genMsg", "Falta a Previsão Orçamentária", 'Falta enviar a planilha de previsão orçamentária de "' + faltaPrev.texto + '".', "Abra a aba correspondente e envie o arquivo .xlsx.");
     return;
   }
 
@@ -3115,9 +3355,11 @@ function buildSlideSpecs() {
     if (item.role !== "assuntos") specs.push({ type: "divider", label: "Divisor", titulo: numero + ". " + item.texto }); // Assuntos Gerais: slide único (numerado abaixo)
 
     if (item.role === "prestacao") {
-      const a11 = PARSED.a11;
+      const prefixoAj = item.extraId ? item.extraId + ":" : "";
+      const a11 = item.a11 || PARSED.a11;
       if (a11) {
         const todosMeses = a11.months;
+        const p11Item = periodoMeses(todosMeses);
         const nChunks = Math.max(1, Math.ceil(todosMeses.length / 12));
         for (let ch = 0; ch < nChunks; ch++) {
           const offset = ch * 12;
@@ -3125,7 +3367,8 @@ function buildSlideSpecs() {
           const sufCol = nChunks > 1 ? " — " + months[0] + " a " + months[months.length - 1] : "";
           const sl = (arr) => (arr ? arr.slice(offset, offset + months.length) : months.map(() => null));
           if (a11.contasPlano && a11.contasPlano.length) {
-            [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chave]) => {
+            [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chaveBase]) => {
+              const chave = prefixoAj + chaveBase;
               const linhasRes = linhasResumo(a11, offset, months.length, soGrupos);
               const pg = paginarTabela(linhasRes.length, "meses", chave);
               pg.faixas.forEach(([i0, i1], pr) => {
@@ -3136,14 +3379,14 @@ function buildSlideSpecs() {
                 const valsTexto = [].concat(...lote.filter((l) => l[1] !== null).map((l) => l[1].map((v) => fmtBRL(v))));
                 const fontePt = Math.min(lay.fontePt, fontePlanoMeses(valsTexto, grande));
                 specs.push({
-                  type: "tabela11a", label: tit, titulo: tit, months, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
+                  type: "tabela11a", label: tit, titulo: tit, periodo: p11Item, months, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
                   aj: { chave, tipo: "meses", pagina: pr, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: linhasRes.length },
                 });
               });
             });
           } else {
             specs.push({
-              type: "tabela11a", label: "Prestação de contas" + sufCol, titulo: "Prestação de contas" + sufCol, months,
+              type: "tabela11a", label: "Prestação de contas" + sufCol, titulo: "Prestação de contas" + sufCol, periodo: p11Item, months,
               rows: [["Saldo anterior", sl(a11.saldoAnterior), false, 0], ["Total de Receitas", sl(a11.totalReceitas), true, 0], ["Total de Despesas", sl(a11.totalDespesas), true, 0], ["Saldo Final", sl(a11.saldoFinal), true, 0]],
             });
           }
@@ -3233,10 +3476,12 @@ function buildSlideSpecs() {
         });
       }
     } else if (item.role === "previsao") {
-      if (PARSED.prev) {
-        const LINHAS_POR_SLIDE_PO = LINHAS_POR_TABELA; // igual a PREVISAO_LINHAS_POR_SLIDE em api/generate_pptx.py
-        const itens = PARSED.prev.itensCompletos && PARSED.prev.itensCompletos.length ? PARSED.prev.itensCompletos : PARSED.prev.categories.map((c) => ({ tipo: "subtotal", nome: c.nome, atualRaw: c.atual, previstoRaw: c.previsto }));
-        const blocosPv = segmentosPrevisao(itens).map((seg) => ({ chave: "previsao:" + slugTabela(seg.nome), nome: seg.nome, itens: seg.itens }));
+      const prefixoAj = item.extraId ? item.extraId + ":" : "";
+      const prevObj = item.previsao || PARSED.prev;
+      if (prevObj) {
+        const LINHAS_POR_SLIDE_PO = LINHAS_POR_TABELA;
+        const itens = prevObj.itensCompletos && prevObj.itensCompletos.length ? prevObj.itensCompletos : prevObj.categories.map((c) => ({ tipo: "subtotal", nome: c.nome, atualRaw: c.atual, previstoRaw: c.previsto }));
+        const blocosPv = segmentosPrevisao(itens).map((seg) => ({ chave: prefixoAj + "previsao:" + slugTabela(seg.nome), nome: seg.nome, itens: seg.itens }));
         fundirBlocos(blocosPv, "previsao").forEach((un) => {
           const pg = paginarTabela(un.itens.length, "previsao", un.chave);
           pg.faixas.forEach(([i0, i1], pagina) => {
@@ -3247,13 +3492,13 @@ function buildSlideSpecs() {
             const titulo = un.fundido ? "Previsão \u2014 " + juntarNomes(un.nomes, "grupos") + sufixoPagina : "Previsão \u2014 " + nomeT + sufixoPagina;
             const lay = layoutTabela("previsao", lote.length);
             specs.push({
-              type: "previsao", label: titulo, titulo, itens: lote, fontePt: lay.fontePt, alturaIn: lay.alturaIn, colunas: nomesColunasPrevisao(PARSED.prev), cab: un.fundido ? "Descrição" : cabecalhoCategoria(nome0),
+              type: "previsao", label: titulo, titulo, itens: lote, fontePt: lay.fontePt, alturaIn: lay.alturaIn, colunas: nomesColunasPrevisao(prevObj), cab: un.fundido ? "Descrição" : cabecalhoCategoria(nome0),
               aj: { chave: un.chave, ultimaChave: un.ultimaChave, familia: "previsao", tipo: "previsao", pagina, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: un.itens.length, fundido: un.fundido, nomes: un.nomes },
             });
           });
         });
         // Rateio dividido em 2 slides: 1) Média por unidade; 2) Por fração
-        const prevR = PARSED.prev;
+        const prevR = prevObj;
         if (prevR.rateioAtual || prevR.rateioPrevisto) {
           const cards = [];
           let reajustePct = null;
@@ -4209,4 +4454,18 @@ document.getElementById("poAbaSel").addEventListener("change", (e) => {
   if (!elInad || !elPo) return;
   elInad.addEventListener("input", () => { if (!elPo.dataset.editado) elPo.value = elInad.value; });
   elPo.addEventListener("input", () => { elPo.dataset.editado = elPo.value ? "1" : ""; });
+})();
+
+(function setupDuplicacaoSecoes() {
+  const btnPrest = document.getElementById("btnDupPrestacao");
+  if (btnPrest) btnPrest.addEventListener("click", () => duplicarSecaoEstrutural("prestacao"));
+
+  const btnPrev = document.getElementById("btnDupPrevisao");
+  if (btnPrev) btnPrev.addEventListener("click", () => duplicarSecaoEstrutural("previsao"));
+
+  const prevOnSelect = window.onCondominioSelected;
+  window.onCondominioSelected = function (id) {
+    if (typeof prevOnSelect === "function") prevOnSelect(id);
+    document.querySelectorAll(".ext-11a-buscar").forEach((b) => { b.disabled = !id; });
+  };
 })();

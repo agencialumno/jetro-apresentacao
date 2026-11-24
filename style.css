@@ -89,11 +89,19 @@ header.top .title p{margin:2px 0 0;font-size:13px;color:var(--muted);}
   .panel.active{display:block;}
 }
 
+/* Cabeçalho com botão de duplicar seção */
+.card-head-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+.card-head-row > div{flex:1 1 320px;}
+.btn-dup-secao{flex:none;white-space:nowrap;}
+
 /* ---------- Pauta: itens arrastáveis ---------- */
 .repeat-block{border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;position:relative;}
-.repeat-block.draggable{cursor:grab;display:flex;align-items:center;gap:8px;padding:8px 36px 8px 8px;}
+.repeat-block.draggable{cursor:grab;display:flex;align-items:center;gap:6px;padding:8px;}
 .repeat-block.draggable.dragging{opacity:.4;}
 .repeat-block .drag-handle{flex:none;color:var(--muted);font-size:14px;line-height:1;cursor:grab;padding:0 2px;user-select:none;}
+.repeat-block.draggable .rm{position:static;flex:none;}
+.repeat-block.draggable .dup-pauta{flex:none;padding:2px 7px;font-size:12px;color:var(--button);border-color:#d8d0ef;}
+.repeat-block.draggable .dup-pauta:hover{background:#f5f3fb;}
 /* abas estruturais (11A/Previsão/16B/Inadimplência) quando o item some da pauta */
 .sidebar nav button.nav-disabled{opacity:.35;cursor:not-allowed;}
 .sidebar nav button.nav-disabled:hover{background:transparent;color:#cfc4ea;}
