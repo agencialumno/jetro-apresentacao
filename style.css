@@ -89,11 +89,19 @@ header.top .title p{margin:2px 0 0;font-size:13px;color:var(--muted);}
   .panel.active{display:block;}
 }
 
+/* Cabeçalho com botão de duplicar seção */
+.card-head-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+.card-head-row > div{flex:1 1 320px;}
+.btn-dup-secao{flex:none;white-space:nowrap;}
+
 /* ---------- Pauta: itens arrastáveis ---------- */
 .repeat-block{border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;position:relative;}
-.repeat-block.draggable{cursor:grab;display:flex;align-items:center;gap:8px;padding:8px 36px 8px 8px;}
+.repeat-block.draggable{cursor:grab;display:flex;align-items:center;gap:6px;padding:8px;}
 .repeat-block.draggable.dragging{opacity:.4;}
 .repeat-block .drag-handle{flex:none;color:var(--muted);font-size:14px;line-height:1;cursor:grab;padding:0 2px;user-select:none;}
+.repeat-block.draggable .rm{position:static;flex:none;}
+.repeat-block.draggable .dup-pauta{flex:none;padding:2px 7px;font-size:12px;color:var(--button);border-color:#d8d0ef;}
+.repeat-block.draggable .dup-pauta:hover{background:#f5f3fb;}
 /* abas estruturais (11A/Previsão/16B/Inadimplência) quando o item some da pauta */
 .sidebar nav button.nav-disabled{opacity:.35;cursor:not-allowed;}
 .sidebar nav button.nav-disabled:hover{background:transparent;color:#cfc4ea;}
@@ -305,7 +313,7 @@ header.top .title p{margin:2px 0 0;font-size:13px;color:var(--muted);}
 
 label{display:block;font-size:13px;font-weight:600;margin:12px 0 5px;}
 label:first-child{margin-top:0;}
-input[type=text], input[type=number], textarea, select{
+input[type=text], input[type=number], input[type=month], input[type=date], input[type=time], textarea, select{
   width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;
   font-size:14px;font-family:inherit;color:var(--text);background:#fff;
 }
@@ -568,3 +576,19 @@ button.secondary:hover{border-color:var(--button);color:var(--button);}
 
 .aviso-cond{margin-top:8px;padding:10px 14px;border-radius:8px;border:1px solid #e0a100;background:#fff4d6;color:#6b4a00;font-size:14px;font-weight:600;line-height:1.4;}
 .aviso-cond[hidden]{display:none;}
+
+/* Anexos de imagens e PDF nas pautas livres */
+.topic-anexos-list{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
+.topic-anexo-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#faf9fd;}
+.topic-anexo-thumb{width:54px;height:38px;object-fit:cover;border-radius:5px;border:1px solid var(--border);flex:none;background:#fff;}
+.topic-anexo-nome{flex:1;font-size:12.5px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.topic-anexo-acoes{display:flex;gap:4px;flex:none;}
+.topic-anexo-acoes button{padding:3px 7px;font-size:12px;border:1px solid var(--border);background:#fff;border-radius:6px;cursor:pointer;color:var(--text);}
+.topic-anexo-acoes button:hover:not([disabled]){border-color:var(--button);color:var(--button);}
+.topic-anexo-acoes button[disabled]{opacity:.35;cursor:not-allowed;}
+.topic-anexo-acoes button.del:hover{border-color:var(--danger);color:var(--danger);}
+
+/* Prévia de slide com imagem/PDF anexado e subtítulo do rateio unificado */
+.pv-anexo-wrap{width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+.pv-anexo-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:.5cqw;}
+.pv-rateio-sub{font-weight:700;font-size:1.45cqw;color:#1D1339;margin:0 0 .8cqw;}

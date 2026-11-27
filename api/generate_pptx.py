@@ -1,8 +1,10 @@
+import base64
 import copy
 import math
 import io
 import re
 import unicodedata
+from PIL import Image as PILImage
 
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -732,11 +734,19 @@ def _grupos_plano(contas, secao, offset, n_meses):
 
 
 def _segmentos_previsao(itens):
-    """Quebra a lista de itens da previsao em [(titulo, [itens])]: um segmento por grupo (a linha do grupo
-    vira o titulo do slide) e um segmento final 'Resumo' com as linhas fora de grupo (Total de pagamentos,
-    Garantidora, Sub-Total, Total despesas). Mesmo algoritmo de segmentosPrevisao em app.js."""
-    segs, resumo, atual = [], [], None
+    """Quebra a lista de itens da previsao em [(titulo, [itens])]: um segmento por grupo e um segmento
+    final 'Resumo' com todo o fechamento (Total de pagamentos, Garantidora, Sub-Total, Fundo de Reserva,
+    Total despesas) na mesma ordem da planilha. Mesmo algoritmo de segmentosPrevisao em app.js."""
+    segs, resumo, atual, em_fechamento = [], [], None, False
     for it in itens:
+        if it.get("tipo") == "subtotal" and re.match(r"^total de pagamentos$", (it.get("nome") or "").strip(), re.I):
+            atual = None
+            em_fechamento = True
+            resumo.append(it)
+            continue
+        if em_fechamento:
+            resumo.append(it)
+            continue
         if it["tipo"] == "grupo":
             atual = [it["nome"], []]
             segs.append(atual)
@@ -1027,33 +1037,137 @@ def _slides_eleicao(novo_conteudo_fn, d):
 
 
 def _linhas_resumo(a11, offset, n_meses, so_grupos=False):
-    """Linhas do resumo 'Prestacao de contas': saldo anterior, TODAS as contas de receita do plano, total de receitas,
-    TODAS as de despesa, total de despesas e saldo final. [(nome, [12 valores], negrito, nivel_recuo)].
-    so_grupos=True: so os grupos de PRIMEIRO NIVEL (filhos diretos de Receitas/Despesas), sem entrar nos subniveis.
-    Regra geral, sem nomes fixos: se a secao tem uma unica raiz (nivel 0, natureza 0), o 1o nivel e o 1; senao, o menor nivel.
-    Mesma regra de linhasResumo em app.js."""
     def fat(arr):
-        return list(arr[offset:]) if arr else [None] * n_meses
+        return list(arr[offset:offset + n_meses]) if arr else [None] * n_meses
     contas = a11.get("contasPlano") or []
     linhas = [("Saldo anterior", fat(a11.get("saldoAnterior")), False, 0, False)]
-    sep = True  # a proxima linha abre um novo bloco (Receitas | Despesas | Saldo final)
+    sep = True
     for secao, chave, rotulo in (("receitas", "totalReceitas", "Total de Receitas"), ("despesas", "totalDespesas", "Total de Despesas")):
         da_secao = [c for c in contas if c.get("secao") == secao]
         niveis = [int(c.get("nivel", 0) or 0) for c in da_secao]
         raizes = [c for c in da_secao if int(c.get("nivel", 0) or 0) == 0]
         nivel_alvo = 1 if (len(raizes) == 1 and raizes[0].get("natureza") == "0" and 1 in niveis) else (min(niveis) if niveis else 0)
         for c in da_secao:
-            vals = [v or 0 for v in (c.get("valores") or [])[offset:]]
+            vals = [v or 0 for v in (c.get("valores") or [])[offset:offset + n_meses]]
             vals = (vals + [0] * n_meses)[:n_meses]
             niv = int(c.get("nivel", 0) or 0)
+            eh_grupo = c.get("natureza") == "0"
             if any(vals) and (not so_grupos or niv == nivel_alvo):
-                linhas.append((c["nome"], vals, c.get("natureza") == "0", 1 if so_grupos else 1 + max(0, niv), sep))
+                vals_exibir = None if (not so_grupos and eh_grupo) else vals
+                linhas.append((c["nome"], vals_exibir, eh_grupo, 1 if so_grupos else 1 + max(0, niv), sep))
                 sep = False
         linhas.append((rotulo, fat(a11.get(chave)), True, 0, sep))
         sep = True
     linhas.append(("Saldo Final", fat(a11.get("saldoFinal")), True, 0, True))
     return linhas
 
+def _diferenca_media_rateio(prev):
+    ra = prev.get("rateioAtual")
+    rp = prev.get("rateioPrevisto")
+    itens_a = (ra.get("itens") or []) if ra else []
+    itens_p = (rp.get("itens") or []) if rp else []
+    if itens_a and itens_p:
+        diffs = []
+        usados = set()
+        for idx_a, a in enumerate(itens_a):
+            na = (a.get("nome") or "").strip().lower()
+            idx_p = next((k for k, p in enumerate(itens_p) if k not in usados and (p.get("nome") or "").strip().lower() == na), None)
+            if idx_p is None and idx_a < len(itens_p) and idx_a not in usados:
+                idx_p = idx_a
+            if idx_p is not None:
+                usados.add(idx_p)
+                p = itens_p[idx_p]
+                if isinstance(a.get("recibo"), (int, float)) and isinstance(p.get("recibo"), (int, float)):
+                    diffs.append(float(p["recibo"]) - float(a["recibo"]))
+        if diffs:
+            ref = itens_p or itens_a
+            eh_fracoes = len(ref) >= 2 and not all(re.match(r"^(cota|fundo|[áa]gua|taxa)", (it.get("nome") or "").strip(), re.I) for it in ref)
+            return (sum(diffs) / len(diffs)) if eh_fracoes else sum(diffs)
+    for b in (ra, rp):
+        if b and b.get("reajuste") is not None and not b.get("reajusteIsPercent"):
+            return float(b["reajuste"])
+    return None
+
+def _linhas_media_rateio(prev, dados):
+    ra = prev.get("rateioAtual")
+    rp = prev.get("rateioPrevisto")
+    un = (
+        _int_ou_none(prev.get("unidadesTotal"))
+        or (_int_ou_none(rp.get("unidades")) if rp else None)
+        or (_int_ou_none(ra.get("unidades")) if ra else None)
+        or _int_ou_none((dados.get("inadimplencia") or {}).get("unidades_total"))
+    )
+    tot_a = prev.get("totalDespesasAtual") if isinstance(prev.get("totalDespesasAtual"), (int, float)) else (ra.get("total") if ra else None)
+    tot_p = prev.get("totalDespesasPrevisto") if isinstance(prev.get("totalDespesasPrevisto"), (int, float)) else (rp.get("total") if rp else None)
+
+    if un and un > 0 and isinstance(tot_a, (int, float)) and isinstance(tot_p, (int, float)):
+        pag_a = pag_p = gar_a = gar_p = fun_a = fun_p = None
+        for it in prev.get("itensCompletos") or []:
+            nm = (it.get("nome") or "").strip()
+            vals = it.get("valores")
+            va = vals[0] if vals and len(vals) >= 1 and isinstance(vals[0], (int, float)) else (it.get("atualRaw") if isinstance(it.get("atualRaw"), (int, float)) else None)
+            vp = vals[1] if vals and len(vals) >= 2 and isinstance(vals[1], (int, float)) else (it.get("previstoRaw") if isinstance(it.get("previstoRaw"), (int, float)) else None)
+            if re.match(r"^total de pagamentos$", nm, re.I):
+                pag_a, pag_p = va, vp
+            elif re.match(r"^(garantidora|inadimpl[êe]ncia)", nm, re.I):
+                gar_a, gar_p = va, vp
+            elif re.match(r"^fundo de reserva", nm, re.I) and va is not None:
+                fun_a, fun_p = va, vp
+        rows = []
+        if isinstance(pag_a, (int, float)) and isinstance(pag_p, (int, float)):
+            rows.append(["Cota Condominial (média/unid.)", fmt_brl(pag_a / un), fmt_brl(pag_p / un), fmt_brl((pag_p - pag_a) / un)])
+        if isinstance(gar_a, (int, float)) and isinstance(gar_p, (int, float)) and (gar_a > 0 or gar_p > 0):
+            rows.append(["Garantidora (média/unid.)", fmt_brl(gar_a / un), fmt_brl(gar_p / un), fmt_brl((gar_p - gar_a) / un)])
+        if isinstance(fun_a, (int, float)) and isinstance(fun_p, (int, float)) and (fun_a > 0 or fun_p > 0):
+            rows.append(["Fundo de Reserva (média/unid.)", fmt_brl(fun_a / un), fmt_brl(fun_p / un), fmt_brl((fun_p - fun_a) / un)])
+        rows.append([(f"Total médio por unidade ({un} unid.)", True), (fmt_brl(tot_a / un), True), (fmt_brl(tot_p / un), True), (fmt_brl((tot_p - tot_a) / un), True)])
+        return rows
+
+    itens_a = (ra.get("itens") or []) if ra else []
+    itens_p = (rp.get("itens") or []) if rp else []
+    ref = itens_p or itens_a
+    eh_fracoes = len(ref) >= 2 and not all(re.match(r"^(cota|fundo|[áa]gua|taxa)", (it.get("nome") or "").strip(), re.I) for it in ref)
+    if not eh_fracoes and (itens_a or itens_p):
+        rows = []
+        for i in range(max(len(itens_a), len(itens_p))):
+            a = itens_a[i] if i < len(itens_a) else {}
+            p = itens_p[i] if i < len(itens_p) else {}
+            va, vp = a.get("recibo"), p.get("recibo")
+            rows.append([
+                p.get("nome") or a.get("nome") or f"Item {i + 1}",
+                "Conforme consumo" if va is None else fmt_brl(va),
+                "Conforme consumo" if vp is None else fmt_brl(vp),
+                fmt_brl(vp - va) if isinstance(va, (int, float)) and isinstance(vp, (int, float)) else "Conforme consumo",
+            ])
+        tot_ra = ra.get("totalRecibo") if ra else None
+        tot_rp = rp.get("totalRecibo") if rp else None
+        if isinstance(tot_ra, (int, float)) or isinstance(tot_rp, (int, float)):
+            diff_t = fmt_brl((tot_rp or 0) - (tot_ra or 0)) if isinstance(tot_ra, (int, float)) and isinstance(tot_rp, (int, float)) else "-"
+            rows.append([("TOTAL POR UNIDADE", True), (fmt_brl(tot_ra), True), (fmt_brl(tot_rp), True), (diff_t, True)])
+        return rows
+    return []
+
+def _add_picture_fit(slide, data_url, img_w=None, img_h=None):
+    """Insere uma imagem (ou pagina de PDF convertida em imagem) centralizada na area util do slide."""
+    if not data_url or "," not in str(data_url):
+        return
+    raw = base64.b64decode(str(data_url).split(",", 1)[1])
+    try:
+        with PILImage.open(io.BytesIO(raw)) as im:
+            w_px, h_px = im.size
+    except Exception:
+        w_px, h_px = (img_w or 1600), (img_h or 900)
+    if not w_px or not h_px:
+        w_px, h_px = 1600, 900
+
+    box_x, box_y = 1.3, 1.85
+    box_w, box_h = 17.4, 7.6
+    escala = min(box_w / w_px, box_h / h_px)
+    w_in = w_px * escala
+    h_in = h_px * escala
+    left = Inches(box_x + (box_w - w_in) / 2)
+    top = Inches(box_y + (box_h - h_in) / 2)
+    slide.shapes.add_picture(io.BytesIO(raw), left, top, width=Inches(w_in), height=Inches(h_in))
 
 def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
     prs = Presentation(template_path)
@@ -1142,47 +1256,58 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             novo_divisor(f"{idx}. {item['texto']}")
 
         if role == "prestacao":
-            # Inadimplencia e Resumo Financeiro (16B) nao dependem do 11A; so os slides do 11A precisam dele.
-            a11 = dados.get("a11")
+            eh_copia = bool(item.get("extraId"))
+            prefixo_aj = f"{item['extraId']}:" if eh_copia else ""
+            a11 = item.get("a11") if eh_copia else dados.get("a11")
             if a11:
-                meses = a11["months"][-12:]
-                offset = len(a11["months"]) - len(meses)
-                periodo_11a = _periodo_meses(meses)
+                todos_meses = a11["months"]
+                periodo_11a = _periodo_meses(todos_meses)
+                n_chunks = max(1, -(-len(todos_meses) // 12))
 
-                def fatiar(arr):
-                    return (arr[offset:] if arr else [None] * len(meses))
+                for ch in range(n_chunks):
+                    offset = ch * 12
+                    meses = todos_meses[offset:offset + 12]
+                    suf_col = f" — {meses[0]} a {meses[-1]}" if n_chunks > 1 else ""
 
-                if a11.get("contasPlano"):
-                    col_w_res = [PLANO_COL_DESC] + [(17.4 - PLANO_COL_DESC) / len(meses)] * len(meses)
-                    # 1o o resumo so com grupos/subgrupos, depois o detalhamento completo (com as contas-folha)
-                    for so_grupos, titulo_res in ((True, "Prestação de contas — Resumo"), (False, "Prestação de contas")):
-                        linhas_res = _linhas_resumo(a11, offset, len(meses), so_grupos)
-                        chave_res = "resumo-grupos" if so_grupos else "resumo"
-                        faixas_res, _l = _paginar_tabela(len(linhas_res), "meses", chave_res, dados.get("ajustes"))
-                        pags_res = len(faixas_res)
-                        for pr, (i0, i1) in enumerate(faixas_res):
-                            lote_r = linhas_res[i0:i1]
-                            rows_r = [[(("   " * niv) + nome, neg)] + [(fmt_brl(v), neg) for v in vals] for nome, vals, neg, niv, _sp in lote_r]
-                            seps_r = {i for i, l in enumerate(lote_r) if l[4]}
-                            grande_r = len(lote_r) + 1 <= TIPOS_TABELA["meses"]["grande"]
-                            fonte_r, altura_r = _layout_tabela("meses", len(lote_r))
-                            sr = novo_conteudo(titulo_res + (f" ({pr+1}/{pags_res})" if pags_res > 1 else ""))
-                            add_table(sr, Inches(1.3), ["Categoria"] + meses, rows_r, col_w_res, font_size=min(fonte_r, _fonte_tabela_meses(rows_r, grande_r)),
-                                      height_in=altura_r, y=Inches(1.9), margin_v=0.04, margin_h=0.04, sep_rows=seps_r)
-                            add_periodo(sr, periodo_11a)
-                else:
-                    s = novo_conteudo("Prestação de contas")
-                    add_periodo(s, periodo_11a)
-                    tbl_rows = [
-                        [("Saldo anterior", False)] + [fmt_brl(v) for v in fatiar(a11["saldoAnterior"])],
-                        [("Total de Receitas", True)] + [fmt_brl(v) for v in fatiar(a11["totalReceitas"])],
-                        [("Total de Despesas", True)] + [fmt_brl(v) for v in fatiar(a11["totalDespesas"])],
-                        [("Saldo Final", True)] + [fmt_brl(v) for v in fatiar(a11["saldoFinal"])],
-                    ]
-                    add_table(s, Inches(1.3), [""] + meses, tbl_rows, [2.6] + [(17.4 - 2.6) / len(meses)] * len(meses), font_size=13, height_in=0.8, y=Inches(3.4))
+                    def fatiar(arr):
+                        return (arr[offset:offset + len(meses)] if arr else [None] * len(meses))
 
-                rec_v = [v or 0 for v in fatiar(a11["totalReceitas"])]
-                desp_v = [v or 0 for v in fatiar(a11["totalDespesas"])]
+                    if a11.get("contasPlano"):
+                        col_w_res = [PLANO_COL_DESC] + [(17.4 - PLANO_COL_DESC) / len(meses)] * len(meses)
+                        for so_grupos, titulo_res in ((True, "Prestação de contas — Resumo"), (False, "Prestação de contas")):
+                            linhas_res = _linhas_resumo(a11, offset, len(meses), so_grupos)
+                            chave_res = prefixo_aj + ("resumo-grupos" if so_grupos else "resumo")
+                            faixas_res, _l = _paginar_tabela(len(linhas_res), "meses", chave_res, dados.get("ajustes"))
+                            pags_res = len(faixas_res)
+                            for pr, (i0, i1) in enumerate(faixas_res):
+                                lote_r = linhas_res[i0:i1]
+                                rows_r = []
+                                for nome, vals, neg, niv, _sp in lote_r:
+                                    if vals is None:
+                                        rows_r.append([(("   " * niv) + nome, neg)] + [""] * len(meses))
+                                    else:
+                                        rows_r.append([(("   " * niv) + nome, neg)] + [(fmt_brl(v), neg) for v in vals])
+                                seps_r = {i for i, l in enumerate(lote_r) if l[4]}
+                                grande_r = len(lote_r) + 1 <= TIPOS_TABELA["meses"]["grande"]
+                                fonte_r, altura_r = _layout_tabela("meses", len(lote_r))
+                                sr = novo_conteudo(titulo_res + suf_col + (f" ({pr+1}/{pags_res})" if pags_res > 1 else ""))
+                                add_table(sr, Inches(1.3), ["Categoria"] + meses, rows_r, col_w_res, font_size=min(fonte_r, _fonte_tabela_meses(rows_r, grande_r)),
+                                          height_in=altura_r, y=Inches(1.9), margin_v=0.04, margin_h=0.04, sep_rows=seps_r)
+                                add_periodo(sr, periodo_11a)
+                    else:
+                        s = novo_conteudo("Prestação de contas" + suf_col)
+                        add_periodo(s, periodo_11a)
+                        tbl_rows = [
+                            [("Saldo anterior", False)] + [fmt_brl(v) for v in fatiar(a11["saldoAnterior"])],
+                            [("Total de Receitas", True)] + [fmt_brl(v) for v in fatiar(a11["totalReceitas"])],
+                            [("Total de Despesas", True)] + [fmt_brl(v) for v in fatiar(a11["totalDespesas"])],
+                            [("Saldo Final", True)] + [fmt_brl(v) for v in fatiar(a11["saldoFinal"])],
+                        ]
+                        add_table(s, Inches(1.3), [""] + meses, tbl_rows, [2.6] + [(17.4 - 2.6) / len(meses)] * len(meses), font_size=13, height_in=0.8, y=Inches(3.4))
+
+                meses = todos_meses
+                rec_v = [v or 0 for v in a11["totalReceitas"]]
+                desp_v = [v or 0 for v in a11["totalDespesas"]]
                 ref_max = max(rec_v + desp_v + [0])
                 n_pag_barras = (len(meses) + BARRAS_MESES_POR_SLIDE - 1) // BARRAS_MESES_POR_SLIDE
                 for pb in range(n_pag_barras):
@@ -1212,7 +1337,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 if a11.get("aguaEsgotoDespesa"):
                     _slides_linha("Despesas com Água / Esgoto", "Água / Esgoto", fatiar(a11["aguaEsgotoDespesa"]))
 
-            inad = dados.get("inadimplencia")
+            inad = item.get("inadimplencia") if eh_copia else dados.get("inadimplencia")
             if inad:
                 s5 = novo_conteudo("Inadimplência")
                 if inad.get("posicao"):
@@ -1244,9 +1369,10 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 ]
                 add_table(s5, Inches(1.3), ["Indicador", "Valor"], [[(r[0][0], r[0][1]), (r[1][0], r[1][1])] for r in rows_inad], [13.4, 4.0], font_size=18, height_in=0.7, y=Inches(4.6))
 
-            b16 = dados.get("b16")
+            b16 = item.get("b16") if eh_copia else dados.get("b16")
             if b16:
-                periodo_16 = _periodo_16b(dados.get("periodo16b", ""))
+                periodo_16_raw = (item.get("periodo16b") or "") if eh_copia else dados.get("periodo16b", "")
+                periodo_16 = _periodo_16b(periodo_16_raw)
                 contas16 = b16["contas"]
                 headers16 = ["Conta", "Saldo anterior", "Créditos", "Débitos", "Saldo final"]
                 rows16 = [[c["nome"], fmt_brl(c["saldoAnt"]), fmt_brl(c["creditos"]), fmt_brl(c["debitos"]), (fmt_brl(c["saldoFinal"]), True)] for c in contas16]
@@ -1284,7 +1410,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     movs_completos = conta.get("movimentos") or []
                     if not movs_completos:
                         continue
-                    blocos_m.append({"chave": f"lanc:{_slug(conta['nome'])}", "nome": conta["nome"], "itens": movs_completos[:MAX_LANCAMENTOS_POR_CONTA],
+                    blocos_m.append({"chave": f"{prefixo_aj}lanc:{_slug(conta['nome'])}", "nome": conta["nome"], "itens": movs_completos[:MAX_LANCAMENTOS_POR_CONTA],
                                      "excedente": max(0, len(movs_completos) - MAX_LANCAMENTOS_POR_CONTA)})
                 for un in _fundir_blocos(blocos_m, "lanc", dados.get("ajustes")):
                     movs = un["itens"]
@@ -1312,17 +1438,25 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                             nota_txt = [f"{n} lançamento(s) adicional(is) de {nm} não exibidos aqui por limite de tamanho — consulte o extrato completo no sistema." for nm, n in exced]
                         add_bullets(sm, Inches(1.3), nota_txt, y=y_nota, width_in=17.4, height_in=0.5, font_size=14)
 
-        elif role == "previsao" and dados.get("previsao"):
-            prev = dados["previsao"]
+        elif role == "previsao" and (item.get("previsao") or dados.get("previsao")):
+            prefixo_aj = f"{item['extraId']}:" if item.get("extraId") else ""
+            prev = item.get("previsao") or dados.get("previsao")
             itens = prev.get("itensCompletos") or [{"tipo": "subtotal", "nome": c["nome"], "atualRaw": c["atual"], "previstoRaw": c["previsto"]} for c in prev["categories"]]
             LINHAS = PREVISAO_LINHAS_POR_SLIDE
             colunas = [str(c) for c in (prev.get("colunasValores") or ["Atual", "Previsto"])]
             n_cols = len(colunas)
 
             def _txt_po(v):
-                if isinstance(v, str) and "consumo" in v.lower():
-                    return "Conf. Consumo"
-                return fmt_brl(v if isinstance(v, (int, float)) else None)
+                if v is None:
+                    return "-"
+                if isinstance(v, (int, float)):
+                    return fmt_brl(v)
+                s = str(v).strip()
+                if not s or s in ("-", "—"):
+                    return "-"
+                if "consumo" in s.lower():
+                    return "Conforme consumo"
+                return s
 
             def _valores_po(it):
                 v = list(it["valores"]) if it.get("valores") is not None else [it.get("atualRaw"), it.get("previstoRaw")]
@@ -1332,7 +1466,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             w_val = max(2.0, min(3.5, 11.4 / n_cols))
             larguras = [17.4 - w_val * n_cols] + [w_val] * n_cols
 
-            blocos_pv = [{"chave": f"previsao:{_slug(n)}", "nome": n, "itens": its} for n, its in _segmentos_previsao(itens)]
+            blocos_pv = [{"chave": f"{prefixo_aj}previsao:{_slug(n)}", "nome": n, "itens": its} for n, its in _segmentos_previsao(itens)]
             for un in _fundir_blocos(blocos_pv, "previsao", dados.get("ajustes")):
                 nome_seg, itens_seg = un["nomes"][0], un["itens"]
                 faixas_p, _l = _paginar_tabela(len(itens_seg), "previsao", un["chave"], dados.get("ajustes"))
@@ -1358,45 +1492,92 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
 
             rateio_atual = prev.get("rateioAtual")
             rateio_previsto = prev.get("rateioPrevisto")
-            if rateio_atual or rateio_previsto:
-                s_rateio = novo_conteudo("Previsão orçamentária — Rateio")
+            tot_a = prev.get("totalDespesasAtual") if isinstance(prev.get("totalDespesasAtual"), (int, float)) else (rateio_atual.get("total") if rateio_atual else None)
+            tot_p = prev.get("totalDespesasPrevisto") if isinstance(prev.get("totalDespesasPrevisto"), (int, float)) else (rateio_previsto.get("total") if rateio_previsto else None)
 
-                # Layout que preenche o slide: duas tabelas grandes lado a lado + cartoes de destaque embaixo.
-                blocos = [b for b in (rateio_atual, rateio_previsto) if b and b.get("itens")]
-                n_linhas = (max(len(b["itens"]) for b in blocos) + 2) if blocos else 0  # cabecalho + itens + TOTAL
-                fonte_r, altura_r = _dim_tabela(n_linhas, 2.4, fim_in=7.6, fonte_base=18, altura_base=0.62)
-
-                def _add_rateio_table(slide_r, x, bloco, titulo):
-                    if not bloco or not bloco.get("itens"):
-                        return
-                    tb = slide_r.shapes.add_textbox(x, Inches(1.55), Inches(8.5), Inches(0.6))
-                    tf = tb.text_frame
-                    tf.text = titulo
-                    tf.paragraphs[0].font.size = Pt(22)
-                    tf.paragraphs[0].font.bold = True
-                    tf.paragraphs[0].font.color.rgb = DARK_PURPLE
-                    rows = []
-                    for it in bloco["itens"]:
-                        recibo = "Conf. Consumo" if it.get("recibo") is None else fmt_brl(it.get("recibo"))
-                        total_r = "Conf. Consumo" if it.get("total") is None else fmt_brl(it.get("total"))
-                        rows.append([it.get("nome", ""), recibo, total_r])
-                    rows.append([("TOTAL", True), "", (fmt_brl(bloco.get("total")), True)])
-                    add_table(slide_r, x, ["Fração", "Recibo", "Total Rateio"], rows, [3.3, 2.6, 2.6], font_size=fonte_r, height_in=altura_r, y=Inches(2.4))
-
-                _add_rateio_table(s_rateio, Inches(1.3), rateio_atual, "Rateio atual")
-                _add_rateio_table(s_rateio, Inches(10.2), rateio_previsto, "Previsão (novo rateio)")
-
+            if rateio_atual or rateio_previsto or (isinstance(tot_a, (int, float)) and isinstance(tot_p, (int, float))):
                 destaques = []
+                reajuste_pct = None
                 for bloco in (rateio_atual, rateio_previsto):
-                    if bloco and bloco.get("reajuste") is not None:
-                        if bloco.get("reajusteIsPercent"):
-                            destaques.append(("Reajuste do rateio", f"{bloco['reajuste']*100:.2f}".replace(".", ",") + "%"))
-                        else:
-                            destaques.append(("Diferença do rateio", "R$ " + fmt_brl(bloco["reajuste"])))
-                if prev.get("totalDespesasAtual") is not None or prev.get("totalDespesasPrevisto") is not None:
-                    destaques.append(("Total de despesas (atual \u2192 previsto)", fmt_brl(prev.get("totalDespesasAtual")) + " \u2192 " + fmt_brl(prev.get("totalDespesasPrevisto"))))
-                if destaques:
-                    add_stat_cards(s_rateio, Inches(1.3), Inches(7.9), destaques, width_total_in=17.4, height_in=1.5, gap_in=0.4)
+                    if bloco and bloco.get("reajuste") is not None and bloco.get("reajusteIsPercent"):
+                        reajuste_pct = bloco["reajuste"]
+                if reajuste_pct is None and isinstance(tot_a, (int, float)) and tot_a > 0 and isinstance(tot_p, (int, float)):
+                    reajuste_pct = (tot_p / tot_a) - 1.0
+                if reajuste_pct is None and rateio_atual and rateio_previsto and isinstance(rateio_atual.get("total"), (int, float)) and rateio_atual["total"] > 0 and isinstance(rateio_previsto.get("total"), (int, float)):
+                    reajuste_pct = (rateio_previsto["total"] / rateio_atual["total"]) - 1.0
+                if reajuste_pct is not None:
+                    destaques.append(("Reajuste do rateio", f"{reajuste_pct*100:.2f}".replace(".", ",") + "%"))
+
+                un_rateio = (
+                    _int_ou_none(prev.get("unidadesTotal"))
+                    or (_int_ou_none(rateio_previsto.get("unidades")) if rateio_previsto else None)
+                    or (_int_ou_none(rateio_atual.get("unidades")) if rateio_atual else None)
+                    or _int_ou_none((dados.get("inadimplencia") or {}).get("unidades_total"))
+                )
+                diff_media = ((tot_p - tot_a) / un_rateio) if (un_rateio and un_rateio > 0 and isinstance(tot_a, (int, float)) and isinstance(tot_p, (int, float))) else _diferenca_media_rateio(prev)
+                if diff_media is not None:
+                    destaques.append(("Diferença média por unidade", "R$ " + fmt_brl(diff_media)))
+
+                if tot_a is not None or tot_p is not None:
+                    destaques.append(("Total de despesas (atual \u2192 previsto)", fmt_brl(tot_a) + " \u2192 " + fmt_brl(tot_p)))
+
+                # Slide 1: Rateio (Media por unidade)
+                linhas_media = _linhas_media_rateio(prev, dados)
+                if linhas_media:
+                    s_media = novo_conteudo("Previsão orçamentária — Rateio (Média por unidade)")
+                    f_m, h_m = _dim_tabela(len(linhas_media) + 1, 2.0, fim_in=7.4, fonte_base=20, altura_base=0.68)
+                    add_table(s_media, Inches(1.3), ["Descrição", "Atual (R$)", "Previsto (R$)", "Diferença (R$)"],
+                              linhas_media, [8.4, 3.0, 3.0, 3.0], font_size=f_m, height_in=h_m, y=Inches(2.0))
+                    if destaques:
+                        add_stat_cards(s_media, Inches(1.3), Inches(7.9), destaques, width_total_in=17.4, height_in=1.5, gap_in=0.4)
+
+                # Slide 2: Rateio por fracao (tabela unificada Atual x Previsto x Diferenca)
+                itens_a = (rateio_atual.get("itens") or []) if rateio_atual else []
+                itens_p = (rateio_previsto.get("itens") or []) if rateio_previsto else []
+                ref_itens = itens_p or itens_a
+                eh_fracoes = len(ref_itens) >= 2 and not all(re.match(r"^(cota|fundo|[áa]gua|taxa)", (it.get("nome") or "").strip(), re.I) for it in ref_itens)
+                if eh_fracoes or not linhas_media:
+                    s_rateio = novo_conteudo("Previsão orçamentária — Rateio por fração")
+                    tb_sub = s_rateio.shapes.add_textbox(Inches(1.3), Inches(1.55), Inches(17.4), Inches(0.5))
+                    tf_sub = tb_sub.text_frame
+                    tf_sub.text = "Rateio atual x Rateio Previsto"
+                    tf_sub.paragraphs[0].font.size = Pt(22)
+                    tf_sub.paragraphs[0].font.bold = True
+                    tf_sub.paragraphs[0].font.color.rgb = DARK_PURPLE
+
+                    usados_p = set()
+                    rows_frac = []
+                    fator = (1.0 + reajuste_pct) if isinstance(reajuste_pct, (int, float)) else None
+                    for idx_a, a in enumerate(itens_a):
+                        na = (a.get("nome") or "").strip().lower()
+                        idx_p = next((k for k, p in enumerate(itens_p) if k not in usados_p and (p.get("nome") or "").strip().lower() == na), None)
+                        if idx_p is None and idx_a < len(itens_p) and idx_a not in usados_p:
+                            idx_p = idx_a
+                        p = itens_p[idx_p] if idx_p is not None else {}
+                        if idx_p is not None:
+                            usados_p.add(idx_p)
+                        va, vp = a.get("recibo"), p.get("recibo")
+                        if vp is None and not itens_p and isinstance(va, (int, float)) and fator is not None:
+                            vp = round(va * fator, 2)
+                        diff_v = fmt_brl(vp - va) if isinstance(va, (int, float)) and isinstance(vp, (int, float)) else ("Conforme consumo" if va is None else "-")
+                        rows_frac.append([
+                            a.get("nome") or p.get("nome") or f"Fração {idx_a + 1}",
+                            "Conforme consumo" if va is None else fmt_brl(va),
+                            "Conforme consumo" if (vp is None and itens_p and p.get("nome")) else ("-" if vp is None else fmt_brl(vp)),
+                            diff_v,
+                        ])
+                    for idx_p, p in enumerate(itens_p):
+                        if idx_p in usados_p:
+                            continue
+                        vp = p.get("recibo")
+                        rows_frac.append([p.get("nome") or f"Fração {idx_p + 1}", "-", "Conforme consumo" if vp is None else fmt_brl(vp), "-"])
+
+                    if rows_frac:
+                        f_fr, h_fr = _dim_tabela(len(rows_frac) + 1, 2.25, fim_in=7.55, fonte_base=20, altura_base=0.68)
+                        add_table(s_rateio, Inches(1.3), ["Fração", "Atual (R$)", "Previsto (R$)", "Diferença (R$)"],
+                                  rows_frac, [7.8, 3.2, 3.2, 3.2], font_size=f_fr, height_in=h_fr, y=Inches(2.25))
+                    if destaques:
+                        add_stat_cards(s_rateio, Inches(1.3), Inches(7.9), destaques, width_total_in=17.4, height_in=1.5, gap_in=0.4)
 
         elif role == "assuntos":
             # Slide unico no estilo divisor: numero do item + titulo fixo "Assuntos Gerais" (sem bullets);
@@ -1414,6 +1595,11 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     sufixo_b = f" ({pb}/{len(paginas_b)})" if len(paginas_b) > 1 else ""
                     s = novo_conteudo(item["texto"] + sufixo_b)
                     add_bullets(s, Inches(1.3), itens_b, y=Inches(1.9), height_in=BULLETS_ALTURA_IN, width_in=17.4, font_size=tam_b)
+            anexos = item.get("anexos") or item.get("imagens") or []
+            for pa, anx in enumerate(anexos, start=1):
+                sufixo_a = f" ({pa}/{len(anexos)})" if len(anexos) > 1 else ""
+                sa = novo_conteudo(item["texto"] + sufixo_a)
+                _add_picture_fit(sa, anx.get("dataUrl"), anx.get("width"), anx.get("height"))
 
     slide4 = prs.slides[3]
     canais = dados.get("canais", {})

@@ -147,7 +147,7 @@ function parseBRNumber(val) {
   if (typeof val === "number") return val;
   if (typeof val !== "string") return 0;
   let s = val.trim();
-  if (s === "" || /conf\.?\s*consumo/i.test(s)) return null; // valor não numérico
+  if (s === "" || /conf(orme|\.?)\s*(o\s*)?consumo/i.test(s)) return null; // valor não numérico
   s = s.replace(/[R$\s]/g, "");
   // remove separador de milhar '.' e troca decimal ',' por '.'
   const negative = /^\(.*\)$/.test(s);
@@ -192,14 +192,13 @@ function parse11A(workbook) {
 
   if (!rows.length) throw new Error("Planilha vazia.");
 
-  // encontra a linha de cabeçalho com os meses (primeira linha com 2+ células tipo "Mmm/AAAA")
   let headerRowIdx = -1;
   let months = [];
   const monthRe = /^[A-Za-zçÇ]{3}\/\d{4}$/;
-  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+  for (let i = 0; i < Math.min(rows.length, 12); i++) {
     const r = rows[i];
     const found = r.filter((c) => typeof c === "string" && monthRe.test(c.trim()));
-    if (found.length >= 3) {
+    if (found.length >= 2) {
       headerRowIdx = i;
       months = r.map((c) => (typeof c === "string" ? c.trim() : null));
       break;
@@ -209,10 +208,20 @@ function parse11A(workbook) {
     throw new Error("Não encontrei a linha com os meses (ex: Dez/2025) no arquivo 11A.");
   }
 
-  const data = {}; // chave: "secao:Rótulo" -> array de valores alinhado a months[]
-  const flatLatest = {}; // chave: "secao:Rótulo" -> último valor sobrescreve (fallback sem seção)
-  let section = null; // 'receitas' | 'despesas' | null (antes de Receitas)
-  const rootRows = {}; // Saldo anterior / Saldo Final (fora de seção)
+  const monthCols = [];
+  for (let c = 1; c < months.length; c++) {
+    if (months[c] && monthRe.test(months[c])) monthCols.push(c);
+  }
+  const monthsClean = monthCols.map((c) => months[c]);
+  const nMeses = monthsClean.length;
+
+  const data = {};
+  let section = null;
+  const rootRows = {};
+  const contasPlano = [];
+  let grupoAtual = null;
+
+  function normLabel(x) { return String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim(); }
 
   for (let i = headerRowIdx + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -220,81 +229,107 @@ function parse11A(workbook) {
     if (label === null || label === undefined || String(label).trim() === "") continue;
     const labelTrim = String(label).trim();
 
-    if (/^receitas$/i.test(labelTrim)) { section = "receitas"; continue; }
-    if (/^despesas$/i.test(labelTrim)) { section = "despesas"; continue; }
+    if (/^receitas$/i.test(labelTrim)) { section = "receitas"; grupoAtual = null; continue; }
+    if (/^despesas$/i.test(labelTrim)) { section = "despesas"; grupoAtual = null; continue; }
+    if (/^mov\.?\s*l[íi]quido/i.test(labelTrim)) { section = null; grupoAtual = null; continue; }
 
-    // "Saldo anterior" e "Saldo Final" ficam fora das seções de Receitas/Despesas
-    // (a 2ª aparece no fim do relatório, já dentro da seção Despesas)
+    const vals = monthCols.map((c) => parseBRNumber(r[c]));
+    const todosVazios = vals.every((v) => v === null || v === undefined);
+
     if (/^saldo (anterior|final)$/i.test(labelTrim)) {
-      const vals = [];
-      for (let c = 1; c < months.length; c++) {
-        if (!months[c]) { vals.push(undefined); continue; }
-        vals.push(parseBRNumber(r[c]));
-      }
+      rootRows[/^saldo anterior$/i.test(labelTrim) ? "Saldo anterior" : "Saldo Final"] = vals;
+      continue;
+    }
+
+    if (section === null) {
       rootRows[labelTrim] = vals;
       continue;
     }
 
-    const values = [];
-    for (let c = 1; c < months.length; c++) {
-      if (!months[c]) { values.push(undefined); continue; }
-      values.push(parseBRNumber(r[c]));
+    if (/^total de (receitas|despesas)$/i.test(labelTrim)) {
+      data[section + ":" + (/receitas/i.test(labelTrim) ? "Total de Receitas" : "Total de Despesas")] = vals;
+      grupoAtual = null;
+      continue;
     }
 
-    if (section === null) {
-      rootRows[labelTrim] = values;
-    } else {
-      const key = section + ":" + labelTrim;
-      data[key] = values;
-      flatLatest[labelTrim] = values; // último que aparecer (usado como fallback)
+    // Linha de subtotal de grupo (ex: "Total de Com Pessoal")
+    if (/^total de /i.test(labelTrim)) {
+      if (grupoAtual) {
+        grupoAtual.valores = vals.map((v) => v || 0);
+        grupoAtual = null;
+      }
+      continue;
     }
+
+    // Cabeçalho de grupo sem valores na linha (ex: "Com Pessoal", "Mensais", "IMPOSTOS")
+    if (todosVazios) {
+      grupoAtual = {
+        conta: (section === "receitas" ? "1." : "2.") + (contasPlano.length + 1),
+        nome: labelTrim,
+        nivel: 0,
+        natureza: "0",
+        secao: section,
+        valores: new Array(nMeses).fill(0),
+      };
+      contasPlano.push(grupoAtual);
+      continue;
+    }
+
+    const key = section + ":" + labelTrim;
+    data[key] = vals;
+
+    const valsNum = vals.map((v) => v || 0);
+    if (grupoAtual) {
+      for (let m = 0; m < nMeses; m++) grupoAtual.valores[m] += valsNum[m];
+    }
+    contasPlano.push({
+      conta: (grupoAtual ? grupoAtual.conta + "." : (section === "receitas" ? "1." : "2.")) + (contasPlano.length + 1),
+      nome: labelTrim,
+      nivel: grupoAtual ? 1 : 0,
+      natureza: section === "receitas" ? "1" : "2",
+      secao: section,
+      valores: valsNum,
+    });
   }
 
-  const monthsClean = months.filter((m) => m);
-
-  function normLabel(x) { return x.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim(); }
   function getSeries(sectionKey, ...labels) {
-    // aceita variações de acento/caixa ("Água e Esgoto" x "Agua e esgoto") e rótulos alternativos
     for (const label of labels) {
       const alvo = sectionKey + ":" + normLabel(label);
       const key = Object.keys(data).find((k) => {
-        const i = k.indexOf(":");
-        return k.slice(0, i) + ":" + normLabel(k.slice(i + 1)) === alvo;
+        const idx = k.indexOf(":");
+        return k.slice(0, idx) + ":" + normLabel(k.slice(idx + 1)) === alvo;
       });
-      if (key) return data[key].filter((v, idx) => months[idx + 1]);
+      if (key) return data[key];
     }
     return null;
-  }
-  function getRoot(label) {
-    return rootRows[label] ? rootRows[label].filter((v, idx) => months[idx + 1]) : null;
   }
 
   const categoriasDetalhadas = Object.keys(data)
     .filter((key) => !/:Total de (Receitas|Despesas)$/i.test(key))
     .map((key) => {
       const idx = key.indexOf(":");
-      const secao = key.slice(0, idx);
-      const label = key.slice(idx + 1);
-      return { secao, label, valores: data[key].filter((v, i) => months[i + 1]) };
+      return { secao: key.slice(0, idx), label: key.slice(idx + 1), valores: data[key] };
     })
     .sort((a, b) => a.label.localeCompare(b.label, "pt-BR"));
 
-  const result = {
-    months: monthsClean,
-    saldoAnterior: getRoot("Saldo anterior"),
-    saldoFinal: getRoot("Saldo Final"),
-    totalReceitas: getSeries("receitas", "Total de Receitas"),
-    totalDespesas: getSeries("despesas", "Total de Despesas"),
-    energiaEletrica: getSeries("despesas", "Energia Elétrica"),
-    aguaEsgotoDespesa: getSeries("despesas", "Agua e esgoto", "Agua/Esgoto"),
-    categoriasDetalhadas,
-  };
+  const totalReceitas = getSeries("receitas", "Total de Receitas");
+  const totalDespesas = getSeries("despesas", "Total de Despesas");
 
-  if (!result.totalReceitas || !result.totalDespesas) {
+  if (!totalReceitas || !totalDespesas) {
     throw new Error('Não encontrei as linhas "Total de Receitas" / "Total de Despesas" no arquivo.');
   }
 
-  return result;
+  return {
+    months: monthsClean,
+    contasPlano: contasPlano.filter((c) => c.valores.some((v) => v)),
+    saldoAnterior: rootRows["Saldo anterior"] || new Array(nMeses).fill(null),
+    saldoFinal: rootRows["Saldo Final"] || new Array(nMeses).fill(null),
+    totalReceitas,
+    totalDespesas,
+    energiaEletrica: getSeries("despesas", "Energia Elétrica"),
+    aguaEsgotoDespesa: getSeries("despesas", "Agua e esgoto", "Agua/Esgoto", "Água"),
+    categoriasDetalhadas,
+  };
 }
 
 /* ===================== PARSER: Previsão Orçamentária ===================== */
@@ -459,8 +494,11 @@ function poImportar3Col(wb, nomeAba) {
   const blocoR = (titulo, papel) => {
     const b = poRateioModelo(titulo);
     b.unidades = unidades;
-    if (iCota >= 0 && iFundoSub >= 0) {
-      b.itens = [{ nome: "Cota Condominial", recibo: "", origem: { linhaId: linhas[iCota].id, papel } }, { nome: "Fundo de Reserva", recibo: "", origem: { linhaId: linhas[iFundoSub].id, papel } }, { nome: "Agua/Esgoto", recibo: "Conf. Consumo" }];
+    const iTotalDesp = linhas.map((l) => l.tipo).lastIndexOf("total");
+    if (iTotalDesp >= 0) {
+      b.itens = [{ nome: "Recibo completo (Cota + Fundo + taxas)", recibo: "", origem: { linhaId: linhas[iTotalDesp].id, papel } }, { nome: "Água / Esgoto", recibo: "Conforme consumo" }];
+    } else if (iCota >= 0 && iFundoSub >= 0) {
+      b.itens = [{ nome: "Cota Condominial", recibo: "", origem: { linhaId: linhas[iCota].id, papel } }, { nome: "Fundo de Reserva", recibo: "", origem: { linhaId: linhas[iFundoSub].id, papel } }, { nome: "Água / Esgoto", recibo: "Conforme consumo" }];
     }
     return b;
   };
@@ -551,6 +589,18 @@ function parsePrevisao(workbook, abaEscolhida) {
       (codigoGrupo(colA) || (vazio(colA) && proxCodigo));
     if (isGroupHeader) { currentGroupLabel = label; itensCompletos.push({ tipo: "grupo", nome: label }); continue; }
 
+    function sufixoCalculo(rowArr, colD) {
+      const calc = rowArr[colD + 1];
+      if (typeof calc === "number" && calc > 0 && calc < 1) {
+        return " (" + String(Math.round(calc * 10000) / 100).replace(".", ",") + "%)";
+      }
+      if (typeof calc === "string" && calc.trim()) {
+        const txt = calc.trim().replace(/\s+/g, " ");
+        return /^\(.*\)$/.test(txt) ? " " + txt : " (" + txt + ")";
+      }
+      return "";
+    }
+
     if (/^sub-?total$/i.test(label) && currentGroupLabel) {
       categories.push({ nome: currentGroupLabel, atual: parseBRNumber(colE), previsto: parseBRNumber(colF) });
       itensCompletos.push({ tipo: "subtotal", nome: "Sub-Total", atualRaw: colE, previstoRaw: colF });
@@ -558,66 +608,98 @@ function parsePrevisao(workbook, abaEscolhida) {
       continue;
     }
 
-    if (currentGroupLabel && !semValor) {
-      itensCompletos.push({ tipo: "item", nome: label, atualRaw: colE, previstoRaw: colF });
-    }
-
-    // Linhas de fechamento (fora dos grupos), na ordem da planilha: Total de pagamentos, Garantidora/Inadimplência
-    // (com o percentual da coluna "Descrição p/ Cálculo"), Sub-Total geral e Total despesas.
+    // Linhas de fechamento fecham qualquer grupo aberto antes (evita duplicar Fundo de Reserva e Total despesas)
     if (/^total de pagamentos$/i.test(label)) {
       currentGroupLabel = null;
       categories.push({ nome: "Total de pagamentos", atual: parseBRNumber(colE), previsto: parseBRNumber(colF) });
       itensCompletos.push({ tipo: "subtotal", nome: "Total de pagamentos", atualRaw: colE, previstoRaw: colF });
     } else if (/^(garantidora|inadimpl[êe]ncia)/i.test(label)) {
+      currentGroupLabel = null;
       categories.push({ nome: /^garantidora/i.test(label) ? "Garantidora" : "Inadimplência", atual: parseBRNumber(colE), previsto: parseBRNumber(colF) });
-      const calc = r[cDesc + 1];
-      let pct = "";
-      if (typeof calc === "number" && calc > 0 && calc < 1) pct = " (" + String(Math.round(calc * 10000) / 100).replace(".", ",") + "%)";
-      else if (typeof calc === "string" && calc.trim()) pct = " (" + calc.trim().replace(/\s+/g, " ") + ")";
-      itensCompletos.push({ tipo: "item", nome: label + pct, atualRaw: colE, previstoRaw: colF });
+      itensCompletos.push({ tipo: "item", nome: label + sufixoCalculo(r, cDesc), atualRaw: colE, previstoRaw: colF });
+    } else if (/^fundo de reserva/i.test(label) && !semValor) {
+      currentGroupLabel = null;
+      categories.push({ nome: "Fundo de Reserva", atual: parseBRNumber(colE), previsto: parseBRNumber(colF) });
+      itensCompletos.push({ tipo: "item", nome: label + sufixoCalculo(r, cDesc), atualRaw: colE, previstoRaw: colF });
     } else if (/^sub-?total$/i.test(label) && !currentGroupLabel) {
       itensCompletos.push({ tipo: "subtotal", nome: "Sub-Total", atualRaw: colE, previstoRaw: colF });
     } else if (/^total despesas$/i.test(label)) {
+      currentGroupLabel = null;
       totalDespesasAtual = parseBRNumber(colE);
       totalDespesasPrevisto = parseBRNumber(colF);
       itensCompletos.push({ tipo: "subtotal", nome: "Total despesas", atualRaw: colE, previstoRaw: colF });
+    } else if (currentGroupLabel && !semValor) {
+      itensCompletos.push({ tipo: "item", nome: label + sufixoCalculo(r, cDesc), atualRaw: colE, previstoRaw: colF });
     }
   }
 
-  // ---- Rateio: blocos = título + linha "Fração" + linhas + "Total" ----
-  function lerBloco(startIdx) {
+  // ---- Rateio: blocos = título + linha "Fração" + linhas + "Total" (aceita blocos empilhados ou lado a lado) ----
+  function lerBloco(startIdx, colTitulo) {
+    const colBase = colTitulo !== undefined ? colTitulo : cDesc;
     let headerIdx = -1;
+    let cFrac = colBase;
     for (let i = startIdx + 1; i < Math.min(startIdx + 6, rows.length); i++) {
-      if (/^fra[çc][ãa]o$/i.test(prevNorm(cell(rows[i], cDesc)))) { headerIdx = i; break; }
+      const r = rows[i] || [];
+      for (let c = Math.max(0, colBase - 1); c < Math.min(r.length, colBase + 6); c++) {
+        if (/^fra[çc][ãa]o$/i.test(prevNorm(r[c]))) { headerIdx = i; cFrac = c; break; }
+      }
+      if (headerIdx !== -1) break;
     }
     if (headerIdx === -1) return null;
     const heads = (rows[headerIdx] || []).map(prevNorm);
-    let cTotal = -1, cRecibo = -1;
-    heads.forEach((t, c) => {
-      if (c === cDesc) return;
+    let cTotal = -1, cRecibo = -1, cVTotal = -1, cUnid = -1;
+    const colsExtrasRecibo = [];
+    for (let c = cFrac + 1; c < heads.length; c++) {
+      const t = heads[c];
+      if (!t && c > cFrac + 1 && colsExtrasRecibo.length + (cTotal >= 0 ? 1 : 0) + (cRecibo >= 0 ? 1 : 0) > 0) break;
+      if (/^fra[çc][ãa]o$/i.test(t)) break;
       if (/total.*rateio|rateio.*total/i.test(t)) cTotal = c;
-      else if (/^recibo$/i.test(t) && cRecibo < 0) cRecibo = c;
-    });
-    if (cRecibo < 0) heads.forEach((t, c) => { if (cRecibo < 0 && /^v\.?\s*total$/i.test(t)) cRecibo = c; });
-    if (cTotal < 0) { for (let c = heads.length - 1; c > cDesc; c--) if (heads[c]) { cTotal = c; break; } }
-    if (cRecibo < 0) cRecibo = cDesc + 1;
+      else if (/^(v\.?\s*total|total\s*unit|valor\s*total|recibo\s*total|valor\s*final)/i.test(t) && cVTotal < 0) cVTotal = c;
+      else if (/^(recibo|cota)/i.test(t) && cRecibo < 0) cRecibo = c;
+      else if (/^(unid|qtd|quant)/i.test(t) && cUnid < 0) cUnid = c;
+      else if (/fundo|garant|taxa|extra/i.test(t)) colsExtrasRecibo.push(c);
+    }
+    if (cTotal < 0) {
+      for (let c = cFrac + 1; c < heads.length; c++) {
+        if (/^fra[çc][ãa]o$/i.test(heads[c])) break;
+        if (heads[c]) cTotal = c;
+      }
+    }
+    const colUnitPrincipal = cVTotal >= 0 ? cVTotal : (cRecibo >= 0 ? cRecibo : cFrac + 1);
+    const somarExtras = cVTotal < 0 && colsExtrasRecibo.length > 0;
 
     const itens = [];
-    let total = null, reajuste = null, reajusteLabel = null, reajusteIsPercent = false;
+    let total = null, reajuste = null, reajusteLabel = null, reajusteIsPercent = false, somaUnidades = 0;
     let fim = headerIdx;
     for (let i = headerIdx + 1; i < Math.min(headerIdx + 40, rows.length); i++) {
-      const nome = cell(rows[i], cDesc);
+      const nome = cell(rows[i], cFrac);
       if (vazio(nome)) break;
       const nomeTrim = prevNorm(nome);
       fim = i;
       if (/^total$/i.test(nomeTrim)) { total = parseBRNumber(cell(rows[i], cTotal)); break; }
-      itens.push({ nome: nomeTrim, recibo: parseBRNumber(cell(rows[i], cRecibo)), total: parseBRNumber(cell(rows[i], cTotal)) });
+      let valRecibo = parseBRNumber(cell(rows[i], colUnitPrincipal));
+      if (somarExtras && typeof valRecibo === "number") {
+        colsExtrasRecibo.forEach((ce) => {
+          const ve = parseBRNumber(cell(rows[i], ce));
+          if (typeof ve === "number") valRecibo += ve;
+        });
+      }
+      const valTotal = parseBRNumber(cell(rows[i], cTotal));
+      if (cUnid >= 0) {
+        const u = parseBRNumber(cell(rows[i], cUnid));
+        if (typeof u === "number" && u > 0) {
+          somaUnidades += u;
+          if (cVTotal < 0 && !somarExtras && typeof valTotal === "number" && valTotal > 0) {
+            valRecibo = Math.round((valTotal / u) * 100) / 100;
+          }
+        }
+      }
+      itens.push({ nome: nomeTrim, recibo: valRecibo, total: valTotal });
     }
-    // "Reajuste de" (%) / "Diferença" (R$): rótulo de texto em qualquer coluna do bloco; número logo abaixo, na mesma coluna
     for (let i = startIdx; i <= Math.min(fim + 1, rows.length - 1) && reajuste === null; i++) {
       const r = rows[i] || [];
       for (let c = 0; c < r.length; c++) {
-        if (c === cDesc || typeof r[c] !== "string" || !/^\s*(reajuste|diferen[çc]a)/i.test(r[c])) continue;
+        if (c === cFrac || typeof r[c] !== "string" || !/^\s*(reajuste|diferen[çc]a)/i.test(r[c])) continue;
         for (let j = i; j <= Math.min(fim + 2, rows.length - 1); j++) {
           const v = (rows[j] || [])[c];
           if (typeof v === "number") { reajuste = v; reajusteLabel = r[c].trim(); reajusteIsPercent = /reajuste/i.test(r[c]); break; }
@@ -625,25 +707,49 @@ function parsePrevisao(workbook, abaEscolhida) {
         if (reajuste !== null) break;
       }
     }
-    return { itens, total, reajuste, reajusteLabel, reajusteIsPercent };
+    return { itens, total, reajuste, reajusteLabel, reajusteIsPercent, unidades: somaUnidades > 0 ? Math.round(somaUnidades) : null };
   }
 
+  const ehTituloBlocoRateio = (t) => /^rateio\b|^novo\s+rateio\b|^simula[çc][ãa]o.*rateio|^previs[ãa]o\b.*(-|rateio|cota)/i.test(t);
   const blocos = [];
   for (let i = hdr.row + 1; i < rows.length; i++) {
-    const t = prevNorm(cell(rows[i], cDesc));
-    if (t && isRateioTitulo(t)) {
-      const b = lerBloco(i);
-      if (b) blocos.push({ titulo: t, idx: i, bloco: b });
+    const r = rows[i] || [];
+    for (let c = 0; c < r.length; c++) {
+      const t = prevNorm(r[c]);
+      if (t && ehTituloBlocoRateio(t)) {
+        const b = lerBloco(i, c);
+        if (b && b.itens.length) blocos.push({ titulo: t, idx: i, col: c, bloco: b });
+      }
     }
   }
   let rateioPrevisto = null;
   for (let k = blocos.length - 1; k >= 0; k--) {
-    if (/^previs[ãa]o/i.test(blocos[k].titulo)) { rateioPrevisto = blocos[k].bloco; break; }
+    if (/^previs[ãa]o|previsto|novo\s+rateio|simula/i.test(blocos[k].titulo)) { rateioPrevisto = blocos[k].bloco; break; }
   }
-  const anteriores = blocos.filter((b) => /^rateio/i.test(b.titulo));
+  const anteriores = blocos.filter((b) => !/^previs[ãa]o|previsto|novo\s+rateio|simula/i.test(b.titulo));
   const comAtual = anteriores.filter((b) => /atual/i.test(b.titulo));
   const escolhido = comAtual.length ? comAtual[comAtual.length - 1] : anteriores[anteriores.length - 1];
   const rateioAtual = escolhido ? escolhido.bloco : null;
+
+  // Se a planilha trouxer só a tabela do Rateio atual por fração, projeta o Rateio previsto pelo fator de reajuste do orçamento
+  if (rateioAtual && rateioAtual.itens && rateioAtual.itens.length && (!rateioPrevisto || !rateioPrevisto.itens || !rateioPrevisto.itens.length)) {
+    if (typeof totalDespesasAtual === "number" && totalDespesasAtual > 0 && typeof totalDespesasPrevisto === "number" && totalDespesasPrevisto > 0) {
+      const fator = totalDespesasPrevisto / totalDespesasAtual;
+      rateioPrevisto = {
+        itens: rateioAtual.itens.map((it) => ({
+          nome: it.nome,
+          recibo: typeof it.recibo === "number" ? Math.round(it.recibo * fator * 100) / 100 : it.recibo,
+          total: typeof it.total === "number" ? Math.round(it.total * fator * 100) / 100 : it.total,
+        })),
+        total: typeof rateioAtual.total === "number" ? Math.round(rateioAtual.total * fator * 100) / 100 : totalDespesasPrevisto,
+        reajuste: fator - 1,
+        reajusteLabel: "Reajuste de",
+        reajusteIsPercent: true,
+        unidades: rateioAtual.unidades,
+        projetado: true,
+      };
+    }
+  }
 
   if (!categories.length) {
     throw new Error("Não encontrei as categorias (Sub-Total) na planilha de previsão orçamentária.");
@@ -661,11 +767,16 @@ function parsePrevisao(workbook, abaEscolhida) {
   };
 }
 
-// Formata um valor de Atual/Previsto da previsão orçamentária: trata o caso especial
-// "Conf. Consumo" (texto, não numérico) igual ao resto da planilha.
+// Formata um valor de Atual/Previsto da previsão orçamentária: preserva textos como "Conforme consumo" e "ISENTO COTA".
 function formatPOValue(raw) {
-  if (typeof raw === "string" && /conf\.?\s*consumo/i.test(raw)) return "Conf. Consumo";
-  return fmtBRL(parseBRNumber(raw));
+  if (raw === null || raw === undefined) return "—";
+  if (typeof raw === "number") return fmtBRL(raw);
+  const s = String(raw).trim();
+  if (!s || /^[-—]+$/.test(s)) return "—";
+  if (/conf(orme|\.?)\s*(o\s*)?consumo/i.test(s)) return "Conforme consumo";
+  const n = parseBRNumber(s);
+  if (n !== null && !isNaN(n)) return fmtBRL(n);
+  return s;
 }
 
 /* ===================== PARSER: 16B (texto colado) ===================== */
@@ -886,16 +997,30 @@ function parseBalanceteMes(apiResponse) {
   const itens = apiResponse[0].itens.map((arr) => arr[0]).filter(Boolean);
   function num(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
   function semAcento(s) { return (s || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); }
-  let totalReceitas = null, totalDespesas = null, energia = 0, agua = 0, foundEnergia = false, foundAgua = false;
+  let totalReceitas = null, totalDespesas = null, somaRecFolha = 0, somaDespFolha = 0;
+  let energia = 0, agua = 0, foundEnergia = false, foundAgua = false;
+
   itens.forEach((it) => {
     const descOriginal = it.descricaocomcontacategoria || it.descricao || "";
-    const desc = semAcento(descOriginal);
-    if (it.conta === "1") totalReceitas = num(it.valor);
-    if (it.conta === "2") totalDespesas = num(it.valor);
-    if (it.natureza === "2" && /energia/.test(desc)) { energia += num(it.valor); foundEnergia = true; }
-    if (it.natureza === "2" && /agua\s*e\s*esgoto|agua\/esgoto/.test(desc)) { agua += num(it.valor); foundAgua = true; }
+    const desc = semAcento(descOriginal).replace(/^\d[\d.]*\s*/, "").trim();
+    const nat = String(it.natureza || "");
+    const conta = String(it.conta || "").trim();
+
+    if (nat === "0" && !conta.includes(".")) {
+      if (/^receitas?$/i.test(desc) || conta === "1") totalReceitas = num(it.valor);
+      if (/^despesas?$/i.test(desc) || conta === "2") totalDespesas = num(it.valor);
+    }
+    if (nat === "1") somaRecFolha += num(it.valor);
+    if (nat === "2") {
+      somaDespFolha += num(it.valor);
+      if (/energia/.test(desc)) { energia += num(it.valor); foundEnergia = true; }
+      if (/\bagua\b/.test(desc) && !/caixa|limpeza/.test(desc)) { agua += num(it.valor); foundAgua = true; }
+    }
   });
-  // categorias "folha" (natureza 1 = receita, 2 = despesa) — exclui totais e subtotais de grupo (natureza 0)
+
+  if (totalReceitas === null && somaRecFolha > 0) totalReceitas = somaRecFolha;
+  if (totalDespesas === null && somaDespFolha > 0) totalDespesas = somaDespFolha;
+
   const categoriasFolha = itens
     .filter((it) => it.natureza === "1" || it.natureza === "2")
     .map((it) => ({
@@ -910,13 +1035,15 @@ function parseBalanceteMes(apiResponse) {
     agua: foundAgua ? agua : null,
     categoriasFolha,
     itensBrutos: itens.map((it) => ({
-      conta: it.conta || "", natureza: it.natureza,
-      nome: (it.descricao || "").trim(), valor: num(it.valor),
+      conta: String(it.conta || "").trim(),
+      natureza: String(it.natureza || ""),
+      nome: (it.descricao || "").replace(/^\d[\d.]*\s*/, "").trim(),
+      valor: num(it.valor),
     })),
   };
 }
 
-/* ===== Plano de contas real do condomínio (hierarquia pelo código da conta) ===== */
+/* ===== Plano de contas real do condomínio (agnóstico a código de conta) ===== */
 const PLANO_CONTAS_CACHE = {};
 
 async function fetchPlanoContas(idCondominio) {
@@ -929,37 +1056,74 @@ async function fetchPlanoContas(idCondominio) {
   return data;
 }
 
-// Junta os itens do 11A de todos os meses numa lista ordenada pelo código da conta (1, 1.1, 1.1.1 ...).
-// O plano de contas completa o nome dos grupos que o 11A não devolveu (sem lançamento no mês): cada
-// grupo ausente é recriado com a soma das contas-folha dele. Contas sem valor em nenhum mês ficam de fora.
-// Resultado: [{ conta, nome, nivel, natureza ("0" grupo | "1" receita | "2" despesa), secao, valores[] }]
 function montarPlanoContas(planoApi, mesesItens) {
   const nomesPlano = {};
-  (planoApi || []).forEach((p) => { nomesPlano[p.st_conta_cont] = (p.st_descricao_cont || "").trim(); });
+  (planoApi || []).forEach((p) => {
+    const cod = String(p.st_conta_cont || "").trim();
+    if (cod && !nomesPlano[cod]) nomesPlano[cod] = (p.st_descricao_cont || "").trim();
+  });
   const n = mesesItens.length;
   const mapa = {};
+  const secaoPorPrefixo = {};
+
+  // Descobre qual prefixo raiz pertence a receitas (natureza "1") e qual pertence a despesas (natureza "2")
+  mesesItens.forEach((itens) => {
+    itens.forEach((it) => {
+      if ((it.natureza === "1" || it.natureza === "2") && it.conta) {
+        const raiz = it.conta.split(".")[0];
+        secaoPorPrefixo[raiz] = it.natureza === "1" ? "receitas" : "despesas";
+      }
+    });
+  });
+
   mesesItens.forEach((itens, i) => {
     itens.forEach((it) => {
-      if (!/^[12](\.\d+)*$/.test(it.conta)) return;
-      if (!mapa[it.conta]) mapa[it.conta] = { conta: it.conta, nome: nomesPlano[it.conta] || it.nome, natureza: it.natureza, valores: new Array(n).fill(null) };
+      if (!/^\d+(\.\d+)*$/.test(it.conta)) return;
+      const raiz = it.conta.split(".")[0];
+      const secao = it.natureza === "1" ? "receitas" : (it.natureza === "2" ? "despesas" : secaoPorPrefixo[raiz]);
+      if (!secao) return;
+      if (!mapa[it.conta]) {
+        mapa[it.conta] = {
+          conta: it.conta,
+          nome: it.nome || nomesPlano[it.conta] || it.conta,
+          natureza: it.natureza,
+          secao,
+          valores: new Array(n).fill(null),
+        };
+      } else if (it.nome && mapa[it.conta].nome === it.conta) {
+        mapa[it.conta].nome = it.nome;
+      }
       mapa[it.conta].valores[i] = it.valor;
     });
   });
+
   const folhas = Object.values(mapa).filter((c) => c.natureza === "1" || c.natureza === "2");
   folhas.forEach((f) => {
     const partes = f.conta.split(".");
     for (let k = 1; k < partes.length; k++) {
       const pai = partes.slice(0, k).join(".");
-      if (!mapa[pai]) mapa[pai] = { conta: pai, nome: nomesPlano[pai] || pai, natureza: "0", valores: new Array(n).fill(null) };
+      if (!mapa[pai]) {
+        mapa[pai] = { conta: pai, nome: nomesPlano[pai] || pai, natureza: "0", secao: f.secao, valores: new Array(n).fill(null) };
+      }
     }
   });
-  // grupo sem valor num mês (ausente no 11A daquele mês) = soma das contas-folha dele naquele mês
+
   Object.values(mapa).filter((c) => c.natureza === "0").forEach((g) => {
     for (let i = 0; i < n; i++) {
       if (g.valores[i] !== null) continue;
       g.valores[i] = folhas.filter((x) => x.conta.indexOf(g.conta + ".") === 0).reduce((t, x) => t + (x.valores[i] || 0), 0);
     }
   });
+
+  // Remove a conta raiz única de cada seção (ex: "1 - Receitas" e "2 - Despesas") para não duplicar o total da seção
+  ["receitas", "despesas"].forEach((sec) => {
+    const daSec = Object.values(mapa).filter((c) => c.secao === sec);
+    const raizes = daSec.filter((c) => !c.conta.includes("."));
+    if (raizes.length === 1 && raizes[0].natureza === "0") {
+      delete mapa[raizes[0].conta];
+    }
+  });
+
   const cmp = (a, b) => {
     const A = a.split(".").map(Number), B = b.split(".").map(Number);
     for (let i = 0; i < Math.max(A.length, B.length); i++) {
@@ -971,8 +1135,12 @@ function montarPlanoContas(planoApi, mesesItens) {
     .filter((c) => c.valores.some((v) => v))
     .sort((a, b) => cmp(a.conta, b.conta))
     .map((c) => ({
-      conta: c.conta, nome: c.nome, nivel: c.conta.split(".").length - 1, natureza: c.natureza,
-      secao: c.conta.charAt(0) === "1" ? "receitas" : "despesas", valores: c.valores,
+      conta: c.conta,
+      nome: c.nome,
+      nivel: Math.max(0, c.conta.split(".").length - 2),
+      natureza: c.natureza,
+      secao: c.secao,
+      valores: c.valores,
     }));
 }
 
@@ -1054,6 +1222,21 @@ async function fetchSaldoConsolidado(contas, idCondominio, dataRefMMDDAAAA, ateA
   return algumEncontrado ? total : null;
 }
 
+(function initPeriodo11A() {
+  const elIni = document.getElementById("f_11a_mes_ini");
+  const elFim = document.getElementById("f_11a_mes_fim");
+  if (!elIni || !elFim) return;
+  const hoje = new Date();
+  let mFim = hoje.getMonth();
+  let yFim = hoje.getFullYear();
+  if (mFim === 0) { mFim = 12; yFim -= 1; }
+  let mIni = mFim - 11;
+  let yIni = yFim;
+  if (mIni <= 0) { mIni += 12; yIni -= 1; }
+  elIni.value = yIni + "-" + pad2(mIni);
+  elFim.value = yFim + "-" + pad2(mFim);
+})();
+
 async function buscar11aAutomatico() {
   const idCondominio = document.getElementById("f_condominio_id").value;
   if (!idCondominio) { reportError("status11a", "Falta selecionar o condomínio", "Selecione um condomínio da lista de busca (aba 'Dados da assembleia') antes de buscar.", "Vá até a primeira aba, digite o nome do condomínio no campo de busca e escolha um item da lista que aparecer."); return; }
@@ -1063,17 +1246,29 @@ async function buscar11aAutomatico() {
   btn.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
   setStatus("status11a", true, "Buscando os últimos 12 meses na Superlógica...");
 
-  const hoje = new Date();
-  let mesRef = hoje.getMonth(); // mês anterior ao atual (getMonth() é 0-indexed, então já aponta pro mês passado em base 1)
-  let anoRef = hoje.getFullYear();
-  if (mesRef === 0) { mesRef = 12; anoRef -= 1; }
+  const valIni = document.getElementById("f_11a_mes_ini")?.value || "";
+  const valFim = document.getElementById("f_11a_mes_fim")?.value || "";
+  if (!valIni || !valFim) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    reportError("status11a", "Falta o período", "Informe o mês/ano de início e fim antes de buscar.", "Preencha os dois campos de período no topo desta aba.");
+    return;
+  }
+  const [yIni, mIni] = valIni.split("-").map(Number);
+  const [yFim, mFim] = valFim.split("-").map(Number);
+  if (yIni * 12 + mIni > yFim * 12 + mFim) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    reportError("status11a", "Período inválido", "O mês/ano inicial não pode ser maior que o mês/ano final.", "Ajuste as datas do período.");
+    return;
+  }
 
   const periodos = [];
-  let m = mesRef, y = anoRef;
-  for (let i = 0; i < 12; i++) {
-    periodos.unshift({ mes: m, ano: y });
-    m -= 1;
-    if (m === 0) { m = 12; y -= 1; }
+  let m = mIni, y = yIni;
+  while (y * 12 + m <= yFim * 12 + mFim && periodos.length < 36) {
+    periodos.push({ mes: m, ano: y });
+    m += 1;
+    if (m === 13) { m = 1; y += 1; }
   }
 
   const months = [], totalReceitas = [], totalDespesas = [], energiaEletrica = [], aguaEsgotoDespesa = [], saldoAnterior = [], saldoFinal = [];
@@ -1131,7 +1326,7 @@ async function buscar11aAutomatico() {
         saldoAnterior.push(null);
         saldoFinal.push(null);
       }
-      setStatus("status11a", true, "Buscando... " + months.length + "/12 meses (" + months[months.length - 1] + ")");
+      setStatus("status11a", true, "Buscando... " + months.length + "/" + periodos.length + " meses (" + months[months.length - 1] + ")");
     }
 
     let contasPlano = null;
@@ -1156,7 +1351,7 @@ async function buscar11aAutomatico() {
     const msgSaldo = saldoDisponivel
       ? "Saldo anterior/final também buscados das contas bancárias."
       : "Não achei contas bancárias ativas para esse condomínio — saldo anterior/final seguem manuais.";
-    setStatus("status11a", true, "12 meses buscados automaticamente (" + months[0] + " a " + months[months.length - 1] + "). " + msgSaldo);
+    setStatus("status11a", true, months.length + " meses buscados automaticamente (" + months[0] + " a " + months[months.length - 1] + "). " + msgSaldo);
     renderPreview11A(data);
     if (typeof refreshPreview === "function") refreshPreview();
   } catch (err) {
@@ -1283,17 +1478,23 @@ async function buscarInadimplenciaAutomatico() {
     } catch (e) { /* endpoint de unidades falhou — degrada sem quebrar o resto */ }
 
     // Garantidora: só existe se o condomínio tem fl_garantido_cond (1/-1). Sem isso (vazio) => 0%.
+    // Uma mesma unidade pode ter cobranças orgânicas e garantidas simultaneamente, então cada carteira é contada de forma independente.
     let temGarantidora = false;
     try { temGarantidora = await fetchCondominioGarantido(idCondominio); } catch (e) { /* assume sem garantidora */ }
-    const garantidas = todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => cobrancaGarantida(c))).length;
+    const garantidas = temGarantidora
+      ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => cobrancaGarantida(c))).length
+      : 0;
+    const organicas = temGarantidora
+      ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => !cobrancaGarantida(c))).length
+      : unidadesInad;
 
     if (totalUnidades) {
       document.getElementById("f_inad_unidades_total").value = String(totalUnidades);
       recalcInadPct();
       const pctDe = (n) => ((n / totalUnidades) * 100).toFixed(2).replace(".", ",");
       document.getElementById("f_inad_garantidora").value = temGarantidora ? pctDe(garantidas) : "0,00";
-      document.getElementById("f_inad_organica").value = pctDe(unidadesInad - (temGarantidora ? garantidas : 0));
-      setStatus("statusInad", true, unidadesInad + " de " + totalUnidades + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor, cobranças e as 3 porcentagens preenchidos" + (temGarantidora ? " (condomínio com garantidora: " + garantidas + " unidade(s) garantida(s))." : " (condomínio sem garantidora: garantidora = 0%).") + "");
+      document.getElementById("f_inad_organica").value = pctDe(organicas);
+      setStatus("statusInad", true, unidadesInad + " de " + totalUnidades + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor, cobranças e as 3 porcentagens preenchidos" + (temGarantidora ? " (orgânica: " + organicas + " unid. | garantidora: " + garantidas + " unid.)." : " (condomínio sem garantidora: garantidora = 0%)."));
     } else {
       setStatus("statusInad", true, unidadesInad + " unidades inadimplentes (" + cobrancasTotal + " cobranças) — valor e cobranças preenchidos. Não consegui o total de unidades; as 3 % seguem manuais.");
     }
@@ -1467,6 +1668,9 @@ setupDropzone("dzpo", "filepo", async (file) => {
     document.getElementById("poManual").hidden = true;
     const data = parsePrevisao(wb);
     PARSED.prev = data;
+    const unPlanilha = (data.rateioPrevisto && data.rateioPrevisto.unidades) || (data.rateioAtual && data.rateioAtual.unidades);
+    const elUnPo = document.getElementById("f_po_unidades_total");
+    if (unPlanilha && elUnPo && !elUnPo.value) elUnPo.value = String(unPlanilha);
     poMontarSeletorAba(wb, data.sheetUsed);
     dz.classList.add("ok");
     avisarPO(data.sheetUsed);
@@ -1542,14 +1746,14 @@ function poIdxPapel(papel) { return PO_MANUAL.colMeta.findIndex((m) => m && m.pa
 
 function poNumero(txt) {
   if (txt === null || txt === undefined || String(txt).trim() === "") return null;
-  if (/conf\.?\s*consumo/i.test(String(txt))) return null;
+  if (/conf(orme|\.?)\s*(o\s*)?consumo/i.test(String(txt))) return null;
   const n = parseBRNumber(String(txt));
   return n === null || isNaN(n) ? null : n;
 }
 function poValorBruto(txt) {
   const t = (txt === null || txt === undefined) ? "" : String(txt).trim();
   if (t === "") return null;
-  if (/conf\.?\s*consumo/i.test(t)) return "Conf. Consumo";
+  if (/conf(orme|\.?)\s*(o\s*)?consumo/i.test(t)) return "Conforme consumo";
   const n = parseBRNumber(t);
   return n === null || isNaN(n) ? t : n;
 }
@@ -1672,11 +1876,12 @@ function poConstruirDados() {
     rateioPrevisto.reajusteLabel = "Reajuste de";
     rateioPrevisto.reajusteIsPercent = true;
   }
+  const unManual = unP || unA || parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10) || null;
   return {
     sheetUsed: "preenchimento manual", condominioNome: null, categories, itensCompletos,
     colunasValores: PO_MANUAL.colunas.map((n) => (n || "").trim() || "Coluna"),
     totalDespesasAtual: totalFinal ? totalFinal[iReal >= 0 ? iReal : 0] : null, totalDespesasPrevisto: totalFinal && totalFinal[iFut >= 0 ? iFut : 1] !== undefined ? totalFinal[iFut >= 0 ? iFut : 1] : null,
-    rateioAtual, rateioPrevisto,
+    rateioAtual, rateioPrevisto, unidadesTotal: unManual,
   };
 }
 function poAtualizarDados() {
@@ -2101,7 +2306,107 @@ function montarFormEleicao(section, topicId) {
   compor();
 }
 
-/* ---------- Seções dinâmicas dos tópicos (aba na sidebar + painel com textarea) ---------- */
+/* ---------- Seções dinâmicas dos tópicos (aba na sidebar + painel com textarea e anexos) ---------- */
+const TOPIC_ATTACHMENTS = {};
+let topicAnexoSeq = 0;
+
+function renderListaAnexosTopico(topicId) {
+  const listEl = document.querySelector("#panel-topic-" + topicId + " .topic-anexos-list");
+  if (!listEl) return;
+  const itens = TOPIC_ATTACHMENTS[topicId] || [];
+  if (!itens.length) { listEl.innerHTML = ""; return; }
+  listEl.innerHTML = itens.map((anx, idx) =>
+    '<div class="topic-anexo-item">' +
+    '<img class="topic-anexo-thumb" src="' + anx.dataUrl + '" alt="">' +
+    '<span class="topic-anexo-nome" title="' + poAttr(anx.name) + '">' + (idx + 1) + ". " + pvEsc(anx.name) + "</span>" +
+    '<div class="topic-anexo-acoes">' +
+    '<button type="button" data-anx-up="' + idx + '"' + (idx === 0 ? " disabled" : "") + ' title="Mover para cima">↑</button>' +
+    '<button type="button" data-anx-dn="' + idx + '"' + (idx === itens.length - 1 ? " disabled" : "") + ' title="Mover para baixo">↓</button>' +
+    '<button type="button" class="del" data-anx-rm="' + idx + '" title="Remover anexo">×</button>' +
+    "</div></div>"
+  ).join("");
+}
+
+function redimensionarImagemDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxW = 1600;
+        const escala = img.width > maxW ? maxW / img.width : 1;
+        const w = Math.round(img.width * escala);
+        const h = Math.round(img.height * escala);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve({ dataUrl: canvas.toDataURL("image/jpeg", 0.86), width: w, height: h });
+      };
+      img.onerror = () => reject(new Error("Imagem inválida: " + file.name));
+      img.src = ev.target.result;
+    };
+    reader.onerror = () => reject(new Error("Falha ao ler " + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function processarArquivosTopico(topicId, fileList, statusEl) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  TOPIC_ATTACHMENTS[topicId] = TOPIC_ATTACHMENTS[topicId] || [];
+  statusEl.className = "status-line ok";
+  statusEl.innerHTML = '<span class="dot"></span>Processando arquivo(s)...';
+  try {
+    for (const file of files) {
+      if (/\.pdf$/i.test(file.name)) {
+        await carregarPdfJs();
+        const buf = await file.arrayBuffer();
+        const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+        const totalPags = Math.min(pdf.numPages, 20);
+        for (let p = 1; p <= totalPags; p++) {
+          const page = await pdf.getPage(p);
+          const vp1 = page.getViewport({ scale: 1 });
+          const escala = Math.min(2, 1600 / vp1.width);
+          const vp = page.getViewport({ scale: escala });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(vp.width);
+          canvas.height = Math.round(vp.height);
+          await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+          topicAnexoSeq += 1;
+          TOPIC_ATTACHMENTS[topicId].push({
+            id: "anx" + topicAnexoSeq,
+            name: file.name + (pdf.numPages > 1 ? " — Pág. " + p + "/" + pdf.numPages : ""),
+            dataUrl: canvas.toDataURL("image/jpeg", 0.86),
+            width: canvas.width,
+            height: canvas.height,
+          });
+        }
+      } else if (file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+        const res = await redimensionarImagemDataUrl(file);
+        topicAnexoSeq += 1;
+        TOPIC_ATTACHMENTS[topicId].push({
+          id: "anx" + topicAnexoSeq,
+          name: file.name,
+          dataUrl: res.dataUrl,
+          width: res.width,
+          height: res.height,
+        });
+      } else {
+        throw new Error("Formato não suportado: " + file.name + ". Use imagens (.jpg, .png) ou .pdf.");
+      }
+    }
+    const qtd = TOPIC_ATTACHMENTS[topicId].length;
+    statusEl.className = "status-line ok";
+    statusEl.innerHTML = '<span class="dot"></span>' + qtd + " slide(s) anexado(s) nesta pauta.";
+    renderListaAnexosTopico(topicId);
+    if (typeof refreshPreview === "function") refreshPreview();
+  } catch (err) {
+    statusEl.className = "status-line err";
+    statusEl.innerHTML = '<span class="dot"></span>' + err.message;
+  }
+}
+
 function criarSecaoTopico(topicId, label) {
   const nome = (label || "").trim() || "Novo tópico";
 
@@ -2123,8 +2428,48 @@ function criarSecaoTopico(topicId, label) {
     '<p class="sub" style="margin-left:0;">Opcional — um item por linha. Deixe em branco para gerar só o slide divisor.</p>' +
     '<div class="body" style="margin-left:0;">' +
     '<textarea id="f_topic_' + topicId + '" rows="4" placeholder="Ex: um item por linha"></textarea>' +
+    '<div class="topic-anexos-box" style="margin-top:16px;">' +
+    '<label>Imagens ou PDF para espelhar nos slides (opcional)</label>' +
+    '<p class="hint" style="margin:0 0 8px;">Suba fotos (ex: melhorias feitas no condomínio) ou um arquivo PDF (ex: orçamento). Cada imagem ou página do PDF vira um slide nesta pauta.</p>' +
+    '<div class="dropzone topic-dz"><input type="file" accept="image/*,.pdf" multiple>Arraste imagens (.jpg, .png) ou PDF aqui, ou clique para selecionar</div>' +
+    '<div class="status-line topic-anexo-status"></div>' +
+    '<div class="topic-anexos-list"></div>' +
+    '</div>' +
     '</div></div>';
   section.querySelector(".topic-title").textContent = nome;
+
+  const dz = section.querySelector(".topic-dz");
+  const inp = dz.querySelector("input");
+  const stEl = section.querySelector(".topic-anexo-status");
+  const listEl = section.querySelector(".topic-anexos-list");
+  dz.addEventListener("click", () => inp.click());
+  dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+  dz.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dz.classList.remove("drag");
+    if (e.dataTransfer.files.length) processarArquivosTopico(topicId, e.dataTransfer.files, stEl);
+  });
+  inp.addEventListener("change", () => {
+    if (inp.files.length) {
+      processarArquivosTopico(topicId, inp.files, stEl);
+      inp.value = "";
+    }
+  });
+  listEl.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    const arr = TOPIC_ATTACHMENTS[topicId] || [];
+    if (b.dataset.anxRm !== undefined) arr.splice(+b.dataset.anxRm, 1);
+    else if (b.dataset.anxUp !== undefined) { const i = +b.dataset.anxUp; if (i > 0) [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; }
+    else if (b.dataset.anxDn !== undefined) { const i = +b.dataset.anxDn; if (i < arr.length - 1) [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; }
+    else return;
+    stEl.className = arr.length ? "status-line ok" : "status-line";
+    stEl.innerHTML = arr.length ? '<span class="dot"></span>' + arr.length + " slide(s) anexado(s) nesta pauta." : "";
+    renderListaAnexosTopico(topicId);
+    if (typeof refreshPreview === "function") refreshPreview();
+  });
+
   document.getElementById("dynamicTopicsPanels").appendChild(section);
   if (tituloEhEleicao(nome)) montarFormEleicao(section, topicId);
 }
@@ -2135,12 +2480,12 @@ function atualizarRotuloTopico(topicId, label) {
   if (btn) btn.dataset.label = nome;
   const titulo = document.querySelector("#panel-topic-" + topicId + " .topic-title");
   if (titulo) titulo.textContent = nome;
-  // renomeou para "Eleição…" e o texto ainda está vazio: troca o campo livre pelo formulário de eleição (nunca sobrescreve texto digitado)
   const ta = document.getElementById("f_topic_" + topicId);
   if (ta && !ta.value.trim() && tituloEhEleicao(nome)) montarFormEleicao(document.getElementById("panel-topic-" + topicId), topicId);
 }
 
 function removerSecaoTopico(topicId) {
+  delete TOPIC_ATTACHMENTS[topicId];
   const btn = document.querySelector('.sidebar nav button[data-panel="topic-' + topicId + '"]');
   const panel = document.getElementById("panel-topic-" + topicId);
   const eraAtiva = (btn && btn.classList.contains("active")) || (panel && panel.classList.contains("active"));
@@ -2150,8 +2495,389 @@ function removerSecaoTopico(topicId) {
 }
 
 /* ---------- Abas estruturais: habilitadas só enquanto o item correspondente está na pauta ---------- */
+/* ---------- Cópias independentes de Prestação de Contas e Previsão Orçamentária ---------- */
+const EXTRA_SECTIONS = {};
+let extraSeq = 0;
+
+function removerSecaoExtra(extraId) {
+  delete EXTRA_SECTIONS[extraId];
+  const btn = document.querySelector('.sidebar nav button[data-panel="extra-' + extraId + '"]');
+  const panel = document.getElementById("panel-extra-" + extraId);
+  const eraAtiva = (btn && btn.classList.contains("active")) || (panel && panel.classList.contains("active"));
+  if (btn) btn.remove();
+  if (panel) panel.remove();
+  const pautaDiv = document.querySelector('#pautaList .repeat-block[data-extra-id="' + extraId + '"]');
+  if (pautaDiv) pautaDiv.remove();
+  updatePautaHint();
+  atualizarAbasEstruturais();
+  if (eraAtiva) switchPanel("1");
+  if (typeof refreshPreview === "function") refreshPreview();
+}
+
+function criarSecaoExtra(role, tituloInicial) {
+  extraSeq += 1;
+  const extraId = "ext" + extraSeq;
+  const nCopia = Object.values(EXTRA_SECTIONS).filter((s) => s.role === role).length + 2;
+  const titulo = (tituloInicial || "").trim() || (role === "prestacao" ? "Prestação de contas (" + nCopia + ")" : "Previsão orçamentária (" + nCopia + ")");
+  EXTRA_SECTIONS[extraId] = { id: extraId, role, a11: null, b16: null, periodo16b: "", inadimplencia: null, prev: null, unidadesTotal: "" };
+
+  const navWrap = document.getElementById("dynamicExtraNav");
+  const panelsWrap = document.getElementById("dynamicExtraPanels");
+  if (navWrap && panelsWrap) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "nav-btn";
+    btn.dataset.panel = "extra-" + extraId;
+    btn.dataset.label = titulo;
+    btn.innerHTML = role === "prestacao"
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 21V9M9 21V3M15 21v-7M21 21V11"></path></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>';
+    navWrap.appendChild(btn);
+
+    const section = document.createElement("section");
+    section.className = "panel";
+    section.id = "panel-extra-" + extraId;
+    section.dataset.panel = "extra-" + extraId;
+
+    if (role === "prestacao") {
+      const defIni = document.getElementById("f_11a_mes_ini")?.value || "";
+      const defFim = document.getElementById("f_11a_mes_fim")?.value || "";
+      const temCond = !!document.getElementById("f_condominio_id")?.value;
+      const disAttr = temCond ? "" : " disabled";
+      section.innerHTML =
+        '<div class="card">' +
+        '<div class="card-head-row"><div>' +
+        '<h2 class="extra-title" style="margin-left:0;"></h2>' +
+        '<p class="sub" style="margin-left:0;">Cópia independente — preencha o 11A, 16B e Inadimplência específicos deste período</p>' +
+        '</div><button type="button" class="secondary btn-rm-extra">✕ Remover esta cópia</button></div>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<h3 class="po-sub-h">1. Relatório 11A — Demonstrativo de Receitas e Despesas</h3>' +
+        '<div class="row" style="margin-bottom:10px;">' +
+        '<div><label>Mês/ano início</label><input type="month" class="ext-11a-ini" value="' + poAttr(defIni) + '"></div>' +
+        '<div><label>Mês/ano fim</label><input type="month" class="ext-11a-fim" value="' + poAttr(defFim) + '"></div>' +
+        '</div>' +
+        '<button type="button" class="primary ext-11a-buscar" style="width:auto;padding:9px 16px;font-size:13px;"' + disAttr + '>Buscar 11A automaticamente</button>' +
+        '<div class="status-line ext-status"></div>' +
+        '<div class="ext-preview"></div>' +
+        '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12.5px;color:var(--muted);">Ou enviar arquivo .xlsx do 11A manualmente</summary>' +
+        '<div class="dropzone ext-dz" style="margin-top:8px;"><input type="file" accept=".xlsx,.xls">Arraste o arquivo .xlsx do relatório 11A aqui, ou clique para selecionar</div>' +
+        '</details>' +
+        '</div></div>' +
+
+        '<div class="card">' +
+        '<h2 style="margin-left:0;">2. Relatório 16B — Resumo Financeiro (desta cópia)</h2>' +
+        '<p class="sub" style="margin-left:0;">Opcional — se ficar vazio, não será repetido nesta prestação de contas</p>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<div class="row">' +
+        '<div><label>Data início</label><input type="date" class="ext-16b-ini"></div>' +
+        '<div><label>Data fim</label><input type="date" class="ext-16b-fim"></div>' +
+        '</div>' +
+        '<button type="button" class="primary ext-16b-buscar" style="width:auto;padding:9px 16px;font-size:13px;margin-top:10px;"' + disAttr + '>Buscar 16B automaticamente</button>' +
+        '<div class="status-line ext-16b-status"></div>' +
+        '<p class="sub" style="margin:12px 0 6px;">Ou envie o relatório 16B (PDF ou planilha)</p>' +
+        '<div class="dropzone ext-16b-dz"><input type="file" accept=".pdf,.xlsx,.xls,.csv">Arraste o relatório 16B (PDF ou planilha) aqui, ou clique para selecionar</div>' +
+        '</div></div>' +
+
+        '<div class="card">' +
+        '<h2 style="margin-left:0;">3. Inadimplência (desta cópia)</h2>' +
+        '<p class="sub" style="margin-left:0;">Opcional — preencha apenas se quiser exibir o slide de inadimplência nesta prestação de contas</p>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<button type="button" class="primary ext-inad-buscar" style="width:auto;padding:9px 16px;font-size:13px;"' + disAttr + '>Buscar inadimplência automaticamente</button>' +
+        '<div class="status-line ext-inad-status"></div>' +
+        '<div class="row3" style="margin-top:12px;">' +
+        '<div><label>% Inadimplência orgânica</label><input type="text" class="ext-inad-org" placeholder="Ex: 22,00"></div>' +
+        '<div><label>% Inadimplência garantidora</label><input type="text" class="ext-inad-gar" placeholder="Ex: 39,00"></div>' +
+        '<div><label>% Inadimplência total</label><input type="text" class="ext-inad-tot" placeholder="Ex: 44,00"></div>' +
+        '</div>' +
+        '<div class="row3">' +
+        '<div><label>Valor acumulado (R$)</label><input type="text" class="ext-inad-val" placeholder="Ex: 85.253,35"></div>' +
+        '<div><label>Nº de cobranças</label><input type="text" class="ext-inad-cob" placeholder="Ex: 229"></div>' +
+        '<div><label>Nº de unidades inadimplentes</label><input type="text" class="ext-inad-un" placeholder="Ex: 12"></div>' +
+        '</div>' +
+        '<div class="row">' +
+        '<div><label>Nº total de unidades do condomínio</label><input type="text" class="ext-inad-untot" placeholder="Ex: 44"></div>' +
+        '<div></div>' +
+        '</div>' +
+        '</div></div>';
+
+      const setStEl = (el, ok, msg) => { el.className = "status-line " + (ok ? "ok" : "err"); el.innerHTML = '<span class="dot"></span>' + msg; };
+
+      // --- 11A da cópia ---
+      const st11 = section.querySelector(".ext-status");
+      const pv11 = section.querySelector(".ext-preview");
+      const renderMini11A = (d) => {
+        pv11.innerHTML = '<p class="hint">Período carregado: <strong>' + pvEsc(d.months[0]) + " a " + pvEsc(d.months[d.months.length - 1]) + "</strong> (" + d.months.length + " meses).</p>";
+      };
+
+      section.querySelector(".ext-11a-buscar").addEventListener("click", async () => {
+        const idCond = document.getElementById("f_condominio_id")?.value;
+        if (!idCond) { showErrorModal("Falta selecionar o condomínio", "Selecione um condomínio na aba 'Dados da assembleia' antes de buscar."); return; }
+        const vIni = section.querySelector(".ext-11a-ini").value;
+        const vFim = section.querySelector(".ext-11a-fim").value;
+        if (!vIni || !vFim) { showErrorModal("Falta o período", "Preencha mês/ano inicial e final."); return; }
+        const [yI, mI] = vIni.split("-").map(Number);
+        const [yF, mF] = vFim.split("-").map(Number);
+        if (yI * 12 + mI > yF * 12 + mF) { showErrorModal("Período inválido", "O mês inicial não pode ser maior que o final."); return; }
+        const btnB = section.querySelector(".ext-11a-buscar");
+        const txtOrig = btnB.textContent;
+        btnB.disabled = true;
+        btnB.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
+        try {
+          const periodos = [];
+          let m = mI, y = yI;
+          while (y * 12 + m <= yF * 12 + mF && periodos.length < 36) { periodos.push({ mes: m, ano: y }); m += 1; if (m === 13) { m = 1; y += 1; } }
+          const months = [], totalReceitas = [], totalDespesas = [], energiaEletrica = [], aguaEsgotoDespesa = [], saldoAnterior = [], saldoFinal = [], mesesItens = [];
+          let contas = [], saldoOk = true;
+          try { contas = await fetchContasBancarias(idCond); if (!contas.length) saldoOk = false; } catch (e) { saldoOk = false; }
+          let saldoAntUlt = null;
+          for (let i = 0; i < periodos.length; i++) {
+            const p = periodos[i];
+            const parsed = parseBalanceteMes(await fetchBalanceteMes(idCond, p.mes, p.ano));
+            months.push(MESES_ABBR[p.mes - 1] + "/" + p.ano);
+            mesesItens.push(parsed ? parsed.itensBrutos : []);
+            totalReceitas.push(parsed ? parsed.totalReceitas : null);
+            totalDespesas.push(parsed ? parsed.totalDespesas : null);
+            energiaEletrica.push(parsed ? parsed.energia : null);
+            aguaEsgotoDespesa.push(parsed ? parsed.agua : null);
+            if (saldoOk) {
+              const sAnt = saldoAntUlt !== null ? saldoAntUlt : await fetchSaldoConsolidado(contas, idCond, pad2(p.mes) + "/01/" + p.ano, 0);
+              const sFim = await fetchSaldoConsolidado(contas, idCond, pad2(p.mes) + "/" + pad2(lastDayOfMonth(p.mes, p.ano)) + "/" + p.ano, 1);
+              saldoAnterior.push(sAnt); saldoFinal.push(sFim); saldoAntUlt = sFim;
+            } else { saldoAnterior.push(null); saldoFinal.push(null); }
+            setStEl(st11, true, "Buscando... " + months.length + "/" + periodos.length + " meses");
+          }
+          let contasPlano = null;
+          try { contasPlano = montarPlanoContas(await fetchPlanoContas(idCond), mesesItens); if (!contasPlano.length) contasPlano = null; } catch (e) {}
+          const d = {
+            months, contasPlano, saldoAnterior, saldoFinal, totalReceitas, totalDespesas,
+            energiaEletrica: energiaEletrica.some((v) => v !== null) ? energiaEletrica : null,
+            aguaEsgotoDespesa: aguaEsgotoDespesa.some((v) => v !== null) ? aguaEsgotoDespesa : null,
+            categoriasDetalhadas: [],
+          };
+          EXTRA_SECTIONS[extraId].a11 = d;
+          setStEl(st11, true, months.length + " meses buscados (" + months[0] + " a " + months[months.length - 1] + ").");
+          renderMini11A(d);
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) {
+          setStEl(st11, false, "Erro ao buscar: " + err.message);
+        } finally { btnB.disabled = false; btnB.textContent = txtOrig; }
+      });
+
+      const dz11 = section.querySelector(".ext-dz");
+      const inp11 = dz11.querySelector("input");
+      dz11.addEventListener("click", () => inp11.click());
+      inp11.addEventListener("change", async () => {
+        if (!inp11.files[0]) return;
+        try {
+          const wb = await readWorkbook(inp11.files[0]);
+          const d = parse11A(wb);
+          EXTRA_SECTIONS[extraId].a11 = d;
+          dz11.classList.add("ok");
+          dz11.textContent = inp11.files[0].name;
+          setStEl(st11, true, d.months.length + " meses carregados (" + d.months[0] + " a " + d.months[d.months.length - 1] + ")");
+          renderMini11A(d);
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) { setStEl(st11, false, "Erro: " + err.message); }
+      });
+
+      // --- 16B da cópia ---
+      const st16 = section.querySelector(".ext-16b-status");
+      section.querySelector(".ext-16b-buscar").addEventListener("click", async () => {
+        const idCond = document.getElementById("f_condominio_id")?.value;
+        const dtIni = section.querySelector(".ext-16b-ini").value;
+        const dtFim = section.querySelector(".ext-16b-fim").value;
+        if (!idCond) { showErrorModal("Falta selecionar o condomínio", "Selecione um condomínio na aba 'Dados da assembleia' antes de buscar."); return; }
+        if (!dtIni || !dtFim) { showErrorModal("Faltam as datas", "Informe a data de início e fim do 16B."); return; }
+        const btnB = section.querySelector(".ext-16b-buscar");
+        const txtOrig = btnB.textContent;
+        btnB.disabled = true;
+        btnB.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
+        try {
+          let contas = await fetchContasBancarias(idCond);
+          const selecionadas = getContasSelecionadasIds();
+          if (selecionadas) contas = contas.filter((c) => selecionadas.includes(String(c.id_contabanco_cb)));
+          const [anoI, mesI, diaI] = dtIni.split("-");
+          const [anoF, mesF, diaF] = dtFim.split("-");
+          const dtIniFmt = mesI + "/" + diaI + "/" + anoI;
+          const dtFimFmt = mesF + "/" + diaF + "/" + anoF;
+          const linhas = [];
+          for (const c of contas) {
+            let saldoAnt = null, saldoFim = null, creditos = null, debitos = null, movimentos = [];
+            try { saldoAnt = await fetchSaldoConta(c.id_contabanco_cb, idCond, dtIniFmt, 0); } catch (e) {}
+            try { saldoFim = await fetchSaldoConta(c.id_contabanco_cb, idCond, dtFimFmt, 1); } catch (e) {}
+            try {
+              const mov = await fetchMovimentacoesConta(c.id_contabanco_cb, idCond, dtIniFmt, dtFimFmt);
+              creditos = mov.creditos; debitos = mov.debitos; movimentos = mov.movimentos;
+            } catch (e) {}
+            linhas.push({ nome: c.st_descricao_cb || c.st_conta_cb || ("Conta " + c.id_contabanco_cb), saldoAnt, creditos, debitos, saldoFinal: saldoFim, movimentos });
+          }
+          EXTRA_SECTIONS[extraId].b16 = { contas: linhas, grupos: [], saldoFinalGeral: null };
+          EXTRA_SECTIONS[extraId].periodo16b = "De " + dtIniFmt + " até " + dtFimFmt;
+          setStEl(st16, true, linhas.length + " conta(s) carregadas (" + dtIniFmt + " a " + dtFimFmt + ").");
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) {
+          setStEl(st16, false, "Erro ao buscar 16B: " + err.message);
+        } finally { btnB.disabled = false; btnB.textContent = txtOrig; }
+      });
+
+      const dz16 = section.querySelector(".ext-16b-dz");
+      const inp16 = dz16.querySelector("input");
+      dz16.addEventListener("click", () => inp16.click());
+      inp16.addEventListener("change", async () => {
+        if (!inp16.files[0]) return;
+        try {
+          const texto = await arquivoParaTexto16B(inp16.files[0]);
+          const data = parse16B(texto);
+          EXTRA_SECTIONS[extraId].b16 = data;
+          EXTRA_SECTIONS[extraId].periodo16b = data.periodo || "";
+          dz16.classList.add("ok");
+          dz16.textContent = inp16.files[0].name;
+          setStEl(st16, true, (data.contas.length + data.grupos.length) + " linhas reconhecidas no 16B.");
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) { setStEl(st16, false, "Erro no 16B: " + err.message); }
+      });
+
+      // --- Inadimplência da cópia ---
+      const stInad = section.querySelector(".ext-inad-status");
+      const elOrg = section.querySelector(".ext-inad-org");
+      const elGar = section.querySelector(".ext-inad-gar");
+      const elTot = section.querySelector(".ext-inad-tot");
+      const elVal = section.querySelector(".ext-inad-val");
+      const elCob = section.querySelector(".ext-inad-cob");
+      const elUn = section.querySelector(".ext-inad-un");
+      const elUnTot = section.querySelector(".ext-inad-untot");
+
+      const syncInadCopia = () => {
+        const pct = pctInadimplencia(elUn.value, elUnTot.value);
+        if (pct !== null) elTot.value = pct;
+        const org = elOrg.value.trim(), gar = elGar.value.trim(), tot = elTot.value.trim(), val = elVal.value.trim();
+        EXTRA_SECTIONS[extraId].inadimplencia = (org || gar || tot || val) ? {
+          organica: org, garantidora: gar, total: tot, valor: val,
+          cobrancas: elCob.value.trim(), unidades: elUn.value.trim(), unidades_total: elUnTot.value.trim(),
+          posicao: dataHojeBR(),
+        } : null;
+        if (typeof refreshPreview === "function") refreshPreview();
+      };
+      [elOrg, elGar, elTot, elVal, elCob, elUn, elUnTot].forEach((inp) => inp.addEventListener("input", syncInadCopia));
+
+      section.querySelector(".ext-inad-buscar").addEventListener("click", async () => {
+        const idCond = document.getElementById("f_condominio_id")?.value;
+        if (!idCond) { showErrorModal("Falta selecionar o condomínio", "Selecione um condomínio na aba 'Dados da assembleia' antes de buscar."); return; }
+        const btnB = section.querySelector(".ext-inad-buscar");
+        const txtOrig = btnB.textContent;
+        btnB.disabled = true;
+        btnB.innerHTML = '<span class="spinner" style="border-color:var(--button);border-top-color:transparent;"></span> Buscando...';
+        try {
+          const hoje = new Date();
+          const posicaoEm = pad2(hoje.getMonth() + 1) + "/" + pad2(hoje.getDate()) + "/" + hoje.getFullYear();
+          let todasUnidades = [], pagina = 1;
+          while (true) {
+            const url = BAL_API_BASE + "/api/superlogica/inadimplencia/index?posicaoEm=" + posicaoEm +
+              "&comValoresAtualizados=0&comValoresAtualizadosPorComposicao=0&idCondominio=" + idCond +
+              "&comDadosDaReceita=1&itensPorPagina=50&pagina=" + pagina + "&semAcordo=0&semProcesso=0";
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const data = await res.json();
+            if (!Array.isArray(data)) throw new Error((data && data.msg) || "resposta inesperada");
+            todasUnidades = todasUnidades.concat(data);
+            if (data.length < 50 || ++pagina > 40) break;
+          }
+          let valorTotal = 0, cobrancasTotal = 0;
+          todasUnidades.forEach((u) => {
+            const cobs = Array.isArray(u.recebimento) ? u.recebimento : [];
+            cobrancasTotal += cobs.length;
+            cobs.forEach((c) => { valorTotal += parseFloat(c.vl_total_recb) || 0; });
+          });
+          elVal.value = valorTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          elCob.value = String(cobrancasTotal);
+          elUn.value = String(todasUnidades.length);
+          let totalUnidades = null;
+          try { totalUnidades = await fetchTotalUnidades(idCond); } catch (e) {}
+          let temGar = false;
+          try { temGar = await fetchCondominioGarantido(idCond); } catch (e) {}
+          const garantidas = temGar ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => cobrancaGarantida(c))).length : 0;
+          const organicas = temGar ? todasUnidades.filter((u) => (Array.isArray(u.recebimento) ? u.recebimento : []).some((c) => !cobrancaGarantida(c))).length : todasUnidades.length;
+          if (totalUnidades) {
+            elUnTot.value = String(totalUnidades);
+            const pctDe = (n) => ((n / totalUnidades) * 100).toFixed(2).replace(".", ",");
+            elGar.value = temGar ? pctDe(garantidas) : "0,00";
+            elOrg.value = pctDe(organicas);
+          }
+          syncInadCopia();
+          setStEl(stInad, true, todasUnidades.length + " unidades inadimplentes carregadas.");
+        } catch (err) {
+          setStEl(stInad, false, "Erro ao buscar inadimplência: " + err.message);
+        } finally { btnB.disabled = false; btnB.textContent = txtOrig; }
+      });
+    } else {
+      section.innerHTML =
+        '<div class="card">' +
+        '<div class="card-head-row"><div>' +
+        '<h2 class="extra-title" style="margin-left:0;"></h2>' +
+        '<p class="sub" style="margin-left:0;">Cópia independente da Previsão Orçamentária — envie a planilha .xlsx deste cenário</p>' +
+        '</div><button type="button" class="secondary btn-rm-extra">✕ Remover esta cópia</button></div>' +
+        '<div class="body" style="margin-left:0;">' +
+        '<div class="dropzone ext-dz"><input type="file" accept=".xlsx,.xls">Arraste o arquivo .xlsx desta previsão orçamentária aqui, ou clique para selecionar</div>' +
+        '<div class="row" style="margin-top:12px;"><div><label>Total de unidades do condomínio (para média do rateio)</label><input type="number" class="ext-po-un" min="1" step="1" placeholder="Ex: 73"></div><div></div></div>' +
+        '<div class="status-line ext-status"></div>' +
+        '<div class="ext-preview"></div>' +
+        '</div></div>';
+
+      const stEl = section.querySelector(".ext-status");
+      const pvEl = section.querySelector(".ext-preview");
+      const unEl = section.querySelector(".ext-po-un");
+      const setSt = (ok, msg) => { stEl.className = "status-line " + (ok ? "ok" : "err"); stEl.innerHTML = '<span class="dot"></span>' + msg; };
+      unEl.addEventListener("input", () => {
+        EXTRA_SECTIONS[extraId].unidadesTotal = unEl.value;
+        if (typeof refreshPreview === "function") refreshPreview();
+      });
+
+      const dz = section.querySelector(".ext-dz");
+      const inp = dz.querySelector("input");
+      dz.addEventListener("click", () => inp.click());
+      inp.addEventListener("change", async () => {
+        if (!inp.files[0]) return;
+        try {
+          const wb = await readWorkbook(inp.files[0]);
+          const d = parsePrevisao(wb);
+          EXTRA_SECTIONS[extraId].prev = d;
+          const unPlan = (d.rateioPrevisto && d.rateioPrevisto.unidades) || (d.rateioAtual && d.rateioAtual.unidades);
+          if (unPlan && !unEl.value) { unEl.value = String(unPlan); EXTRA_SECTIONS[extraId].unidadesTotal = String(unPlan); }
+          dz.classList.add("ok");
+          dz.textContent = inp.files[0].name;
+          setSt(true, 'Aba "' + d.sheetUsed + '" — ' + d.categories.length + " categorias, total previsto " + fmtBRL(d.totalDespesasPrevisto, true));
+          pvEl.innerHTML = '<p class="hint">Planilha carregada com sucesso (' + d.categories.length + ' categorias).</p>';
+          if (typeof refreshPreview === "function") refreshPreview();
+        } catch (err) { setSt(false, "Erro: " + err.message); }
+      });
+    }
+
+    section.querySelector(".extra-title").textContent = titulo;
+    section.querySelector(".btn-rm-extra").addEventListener("click", () => removerSecaoExtra(extraId));
+    panelsWrap.appendChild(section);
+  }
+
+  return { extraId, titulo };
+}
+
+function atualizarRotuloExtra(extraId, label) {
+  const nome = (label || "").trim() || "Cópia";
+  const btn = document.querySelector('.sidebar nav button[data-panel="extra-' + extraId + '"]');
+  if (btn) btn.dataset.label = nome;
+  const tit = document.querySelector("#panel-extra-" + extraId + " .extra-title");
+  if (tit) tit.textContent = nome;
+}
+
+function duplicarSecaoEstrutural(role, tituloBase) {
+  const { extraId, titulo } = criarSecaoExtra(role, tituloBase);
+  addPautaItem(titulo, role, extraId);
+  switchPanel("extra-" + extraId);
+  if (typeof refreshPreview === "function") refreshPreview();
+}
+
 function atualizarAbasEstruturais() {
-  const roles = new Set(getPautaItemsComRole().map((it) => it.role));
+  const itens = getPautaItemsComRole();
+  const roles = new Set(itens.filter((it) => !it.extraId).map((it) => it.role));
   Object.keys(STRUCTURAL_TABS).forEach((role) => {
     const cfg = STRUCTURAL_TABS[role];
     const disponivel = roles.has(role);
@@ -2175,18 +2901,22 @@ function atualizarAbasEstruturais() {
 function updatePautaHint() {
   const total = document.querySelectorAll(".pauta-input").length;
   document.getElementById("pautaHint").textContent =
-    total + " item(ns) na pauta. Arraste para reordenar; qualquer item pode ser editado ou removido.";
+    total + " item(ns) na pauta. Arraste para reordenar; clique em ⧉ para duplicar Prestação de contas ou Previsão orçamentária.";
 }
 
-function addPautaItem(value, role) {
+function addPautaItem(value, role, extraId) {
   role = role || "topico";
   const list = document.getElementById("pautaList");
   const div = document.createElement("div");
   div.className = "repeat-block draggable";
   div.draggable = true;
   div.dataset.role = role;
+  if (extraId) div.dataset.extraId = extraId;
+
+  const podeDuplicar = role === "prestacao" || role === "previsao";
   div.innerHTML = '<span class="drag-handle" title="Arraste para reordenar">⋮⋮</span>' +
     '<input type="text" class="pauta-input" style="flex:1;">' +
+    (podeDuplicar ? '<button type="button" class="secondary dup-pauta" title="Duplicar esta seção (cria uma nova aba independente)">⧉</button>' : "") +
     '<button type="button" class="secondary rm" style="padding:2px 8px;">×</button>';
   const input = div.querySelector(".pauta-input");
   input.value = value || "";
@@ -2199,10 +2929,17 @@ function addPautaItem(value, role) {
 
   input.addEventListener("input", () => {
     if (div.dataset.topicId) atualizarRotuloTopico(div.dataset.topicId, input.value);
+    if (div.dataset.extraId) atualizarRotuloExtra(div.dataset.extraId, input.value);
     atualizarAbasEstruturais();
   });
+  if (podeDuplicar) {
+    div.querySelector(".dup-pauta").addEventListener("click", () => {
+      duplicarSecaoEstrutural(role, (input.value.trim() || "Item") + " (2)");
+    });
+  }
   div.querySelector(".rm").addEventListener("click", () => {
     if (div.dataset.topicId) removerSecaoTopico(div.dataset.topicId);
+    if (div.dataset.extraId) removerSecaoExtra(div.dataset.extraId);
     div.remove();
     updatePautaHint();
     atualizarAbasEstruturais();
@@ -2228,6 +2965,7 @@ function addPautaItem(value, role) {
 
 function resetPautaList() {
   document.querySelectorAll("#pautaList .repeat-block[data-topic-id]").forEach((div) => removerSecaoTopico(div.dataset.topicId));
+  Object.keys(EXTRA_SECTIONS).forEach((id) => removerSecaoExtra(id));
   document.getElementById("pautaList").innerHTML = "";
   DEFAULT_PAUTA.forEach((item) => addPautaItem(item.text, item.role));
 }
@@ -2310,6 +3048,27 @@ function getPautaItemsComRole() {
       item.conteudo = ta ? ta.value.trim() : "";
       const el = lerEleicao(div.dataset.topicId);
       if (el) item.eleicao = el;
+      const imgs = TOPIC_ATTACHMENTS[div.dataset.topicId];
+      if (imgs && imgs.length) item.imagens = imgs.map((x) => ({ dataUrl: x.dataUrl, width: x.width, height: x.height, titulo: x.name }));
+    }
+    if (div.dataset.extraId) {
+      item.extraId = div.dataset.extraId;
+      const sec = EXTRA_SECTIONS[div.dataset.extraId];
+      if (sec) {
+        if (item.role === "prestacao") {
+          if (sec.a11) item.a11 = sec.a11;
+          if (sec.inadimplencia) item.inadimplencia = sec.inadimplencia;
+          if (sec.b16) { item.b16 = sec.b16; item.periodo16b = sec.periodo16b || ""; }
+        }
+        if (item.role === "previsao" && sec.prev) {
+          const un = parseInt(sec.unidadesTotal || "", 10)
+            || parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+            || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+            || sec.prev.unidadesTotal
+            || null;
+          item.previsao = Object.assign({}, sec.prev, un ? { unidadesTotal: un } : {});
+        }
+      }
     }
     return item;
   }).filter((it) => it.texto);
@@ -2358,7 +3117,13 @@ function montarDadosParaBackend() {
     dados.periodo16b = document.getElementById("f_16b_periodo").value.trim();
   }
 
-  if (PARSED.prev) dados.previsao = PARSED.prev;
+  if (PARSED.prev) {
+    const unPo = parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+      || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+      || PARSED.prev.unidadesTotal
+      || null;
+    dados.previsao = Object.assign({}, PARSED.prev, unPo ? { unidadesTotal: unPo } : {});
+  }
 
   return dados;
 }
@@ -2378,13 +3143,15 @@ async function gerarApresentacaoModelo() {
     reportError("genMsg", "Pauta vazia", "A pauta não tem nenhum item com texto.", "Volte na aba \"Dados da assembleia\" e adicione ou preencha pelo menos um item da pauta.");
     return;
   }
-  // Os relatórios só são exigidos se o item correspondente ainda está na pauta.
-  if (pauta.some((it) => it.role === "prestacao") && !PARSED.a11) {
-    reportError("genMsg", "Falta o relatório 11A", "O relatório 11A ainda não foi buscado nem enviado.", "Vá na aba \"Relatório 11A\" e clique em buscar automaticamente, ou envie o arquivo .xlsx manualmente. Se não quiser a prestação de contas, remova esse item da pauta.");
+  // Os relatórios só são exigidos se o item correspondente ainda está na pauta (incluindo cópias).
+  const faltaPrest = pauta.find((it) => it.role === "prestacao" && !(it.extraId ? it.a11 : PARSED.a11));
+  if (faltaPrest) {
+    reportError("genMsg", "Falta o relatório 11A", 'Falta buscar ou enviar o relatório 11A de "' + faltaPrest.texto + '".', "Abra a aba correspondente e clique em buscar automaticamente ou envie o arquivo .xlsx.");
     return;
   }
-  if (pauta.some((it) => it.role === "previsao") && !PARSED.prev) {
-    reportError("genMsg", "Falta a Previsão Orçamentária", "A planilha de previsão orçamentária ainda não foi enviada.", "Vá na aba \"Previsão Orçamentária\" e envie o arquivo .xlsx. Se não quiser a previsão orçamentária, remova esse item da pauta.");
+  const faltaPrev = pauta.find((it) => it.role === "previsao" && !(it.extraId ? it.previsao : PARSED.prev));
+  if (faltaPrev) {
+    reportError("genMsg", "Falta a Previsão Orçamentária", 'Falta enviar a planilha de previsão orçamentária de "' + faltaPrev.texto + '".', "Abra a aba correspondente e envie o arquivo .xlsx.");
     return;
   }
 
@@ -2739,11 +3506,21 @@ function valoresItemPrevisao(it, n) {
   while (v.length < n) v.push(null);
   return v;
 }
-// Igual a _segmentos_previsao no backend: um segmento por grupo + "Resumo" com as linhas fora de grupo.
+// Igual a _segmentos_previsao no backend: um segmento por grupo + "Resumo" com todo o fechamento na ordem da planilha.
 function segmentosPrevisao(itens) {
   const segs = [], resumo = [];
-  let atual = null;
+  let atual = null, emFechamento = false;
   itens.forEach((it) => {
+    if (it.tipo === "subtotal" && /^total de pagamentos$/i.test(String(it.nome || "").trim())) {
+      atual = null;
+      emFechamento = true;
+      resumo.push(it);
+      return;
+    }
+    if (emFechamento) {
+      resumo.push(it);
+      return;
+    }
     if (it.tipo === "grupo") { atual = { nome: it.nome, itens: [] }; segs.push(atual); }
     else if (atual) { atual.itens.push(it); if (it.tipo === "subtotal") atual = null; }
     else resumo.push(it);
@@ -2796,7 +3573,7 @@ function linhas16B(b16) {
   return L;
 }
 function linhasResumo(a11, offset, nMeses, soGrupos) {
-  const fat = (arr) => (arr ? arr.slice(offset) : new Array(nMeses).fill(null));
+  const fat = (arr) => (arr ? arr.slice(offset, offset + nMeses) : new Array(nMeses).fill(null));
   const contas = a11.contasPlano || [];
   const linhas = [["Saldo anterior", fat(a11.saldoAnterior), false, 0, false]];
   let sepProx = true; // a próxima linha abre um novo bloco (Receitas | Despesas | Saldo final)
@@ -2807,16 +3584,170 @@ function linhasResumo(a11, offset, nMeses, soGrupos) {
     const raizes = daSecao.filter((c) => (c.nivel || 0) === 0);
     const nivelAlvo = raizes.length === 1 && raizes[0].natureza === "0" && niveis.indexOf(1) >= 0 ? 1 : (niveis.length ? Math.min(...niveis) : 0);
     daSecao.forEach((c) => {
-      const vals = c.valores.slice(offset).map((v) => v || 0);
+      const vals = c.valores.slice(offset, offset + nMeses).map((v) => v || 0);
       while (vals.length < nMeses) vals.push(0);
-      vals.length = nMeses;
-      if (vals.some((v) => v) && (!soGrupos || (c.nivel || 0) === nivelAlvo)) { linhas.push([c.nome, vals, c.natureza === "0", soGrupos ? 1 : 1 + Math.max(0, c.nivel || 0), sepProx]); sepProx = false; }
+      const ehGrupo = c.natureza === "0";
+      if (vals.some((v) => v) && (!soGrupos || (c.nivel || 0) === nivelAlvo)) {
+        const valsExibir = (!soGrupos && ehGrupo) ? null : vals;
+        linhas.push([c.nome, valsExibir, ehGrupo, soGrupos ? 1 : 1 + Math.max(0, c.nivel || 0), sepProx]);
+        sepProx = false;
+      }
     });
     linhas.push([rotulo, fat(tot), true, 0, sepProx]);
     sepProx = true;
   });
   linhas.push(["Saldo Final", fat(a11.saldoFinal), true, 0, true]);
   return linhas;
+}
+
+function calcularDiferencaMediaRateio(prev) {
+  const ra = prev && prev.rateioAtual;
+  const rp = prev && prev.rateioPrevisto;
+  const un = parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+    || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+    || (prev && prev.unidadesTotal)
+    || (rp && rp.unidades)
+    || (ra && ra.unidades)
+    || null;
+  const totA = (prev && typeof prev.totalDespesasAtual === "number") ? prev.totalDespesasAtual : (ra && ra.total);
+  const totP = (prev && typeof prev.totalDespesasPrevisto === "number") ? prev.totalDespesasPrevisto : (rp && rp.total);
+  if (un && un > 0 && typeof totA === "number" && typeof totP === "number") {
+    return (totP - totA) / un;
+  }
+
+  const itensA = (ra && ra.itens) || [];
+  const itensP = (rp && rp.itens) || [];
+  if (itensA.length && itensP.length) {
+    const diffs = [];
+    const usados = new Set();
+    itensA.forEach((a, idxA) => {
+      const na = String(a.nome || "").trim().toLowerCase();
+      let idxP = itensP.findIndex((p, k) => !usados.has(k) && String(p.nome || "").trim().toLowerCase() === na);
+      if (idxP < 0 && idxA < itensP.length && !usados.has(idxA)) idxP = idxA;
+      if (idxP >= 0) {
+        usados.add(idxP);
+        const p = itensP[idxP];
+        if (typeof a.recibo === "number" && typeof p.recibo === "number") diffs.push(p.recibo - a.recibo);
+      }
+    });
+    if (diffs.length) {
+      const ref = itensP.length ? itensP : itensA;
+      const ehFracoes = ref.length >= 2 && !ref.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+      return ehFracoes ? (diffs.reduce((s, d) => s + d, 0) / diffs.length) : diffs.reduce((s, d) => s + d, 0);
+    }
+  }
+  for (const b of [ra, rp]) {
+    if (b && b.reajuste !== null && b.reajuste !== undefined && !b.reajusteIsPercent) return b.reajuste;
+  }
+  return null;
+}
+
+function montarLinhasRateioFracao(prev, reajustePct) {
+  const ra = prev && prev.rateioAtual;
+  const rp = prev && prev.rateioPrevisto;
+  const itensA = (ra && ra.itens) || [];
+  const itensP = (rp && rp.itens) || [];
+  if (!itensA.length && !itensP.length) return [];
+  const fator = typeof reajustePct === "number" ? (1 + reajustePct) : null;
+  const rows = [];
+  if (itensA.length && itensP.length) {
+    const usados = new Set();
+    itensA.forEach((a, idxA) => {
+      const na = String(a.nome || "").trim().toLowerCase();
+      let idxP = itensP.findIndex((p, k) => !usados.has(k) && String(p.nome || "").trim().toLowerCase() === na);
+      if (idxP < 0 && idxA < itensP.length && !usados.has(idxA)) idxP = idxA;
+      const p = idxP >= 0 ? itensP[idxP] : {};
+      if (idxP >= 0) usados.add(idxP);
+      const va = a.recibo;
+      let vp = p.recibo;
+      if ((vp === null || vp === undefined) && typeof va === "number" && fator !== null) vp = va * fator;
+      const diff = typeof va === "number" && typeof vp === "number" ? (vp - va) : null;
+      rows.push([
+        p.nome || a.nome || ("Fração " + (idxA + 1)),
+        va === null || va === undefined ? "Conforme consumo" : fmtBRL(va),
+        vp === null || vp === undefined ? "Conforme consumo" : fmtBRL(vp),
+        diff === null ? "—" : fmtBRL(diff),
+      ]);
+    });
+    itensP.forEach((p, k) => {
+      if (usados.has(k)) return;
+      const vp = p.recibo;
+      rows.push([p.nome || ("Fração " + (k + 1)), "—", vp === null || vp === undefined ? "Conforme consumo" : fmtBRL(vp), "—"]);
+    });
+  } else if (itensA.length) {
+    itensA.forEach((a, idxA) => {
+      const va = a.recibo;
+      const vp = typeof va === "number" && fator !== null ? (va * fator) : null;
+      const diff = typeof va === "number" && typeof vp === "number" ? (vp - va) : null;
+      rows.push([
+        a.nome || ("Fração " + (idxA + 1)),
+        va === null || va === undefined ? "Conforme consumo" : fmtBRL(va),
+        vp === null ? "—" : fmtBRL(vp),
+        diff === null ? "—" : fmtBRL(diff),
+      ]);
+    });
+  } else {
+    itensP.forEach((p, idxP) => {
+      const vp = p.recibo;
+      rows.push([p.nome || ("Fração " + (idxP + 1)), "—", vp === null || vp === undefined ? "Conforme consumo" : fmtBRL(vp), "—"]);
+    });
+  }
+  return rows;
+}
+
+function montarLinhasMediaRateio(prev) {
+  const un = parseInt(document.getElementById("f_po_unidades_total")?.value || "", 10)
+    || parseInt(document.getElementById("f_inad_unidades_total")?.value || "", 10)
+    || prev.unidadesTotal
+    || (prev.rateioPrevisto && prev.rateioPrevisto.unidades)
+    || (prev.rateioAtual && prev.rateioAtual.unidades)
+    || null;
+  const totA = typeof prev.totalDespesasAtual === "number" ? prev.totalDespesasAtual : (prev.rateioAtual && prev.rateioAtual.total);
+  const totP = typeof prev.totalDespesasPrevisto === "number" ? prev.totalDespesasPrevisto : (prev.rateioPrevisto && prev.rateioPrevisto.total);
+
+  if (un && un > 0 && typeof totA === "number" && typeof totP === "number") {
+    let pagA = null, pagP = null, garA = null, garP = null, funA = null, funP = null;
+    (prev.itensCompletos || []).forEach((it) => {
+      const nm = String(it.nome || "").trim();
+      const va = it.valores && typeof it.valores[0] === "number" ? it.valores[0] : (typeof it.atualRaw === "number" ? it.atualRaw : null);
+      const vp = it.valores && typeof it.valores[1] === "number" ? it.valores[1] : (typeof it.previstoRaw === "number" ? it.previstoRaw : null);
+      if (/^total de pagamentos$/i.test(nm)) { pagA = va; pagP = vp; }
+      else if (/^(garantidora|inadimpl[êe]ncia)/i.test(nm)) { garA = va; garP = vp; }
+      else if (/^fundo de reserva/i.test(nm) && va !== null) { funA = va; funP = vp; }
+    });
+    const rows = [];
+    if (typeof pagA === "number" && typeof pagP === "number") rows.push(["Cota Condominial (média/unid.)", fmtBRL(pagA / un), fmtBRL(pagP / un), fmtBRL((pagP - pagA) / un), false]);
+    if (typeof garA === "number" && typeof garP === "number" && (garA > 0 || garP > 0)) rows.push(["Garantidora (média/unid.)", fmtBRL(garA / un), fmtBRL(garP / un), fmtBRL((garP - garA) / un), false]);
+    if (typeof funA === "number" && typeof funP === "number" && (funA > 0 || funP > 0)) rows.push(["Fundo de Reserva (média/unid.)", fmtBRL(funA / un), fmtBRL(funP / un), fmtBRL((funP - funA) / un), false]);
+    rows.push(["Total médio por unidade (" + un + " unid.)", fmtBRL(totA / un), fmtBRL(totP / un), fmtBRL((totP - totA) / un), true]);
+    return rows;
+  }
+
+  const ra = prev.rateioAtual, rp = prev.rateioPrevisto;
+  const itensA = (ra && ra.itens) || [], itensP = (rp && rp.itens) || [];
+  const ref = itensP.length ? itensP : itensA;
+  const ehFracoes = ref.length >= 2 && !ref.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+  if (!ehFracoes && (itensA.length || itensP.length)) {
+    const rows = [];
+    const nMax = Math.max(itensA.length, itensP.length);
+    for (let i = 0; i < nMax; i++) {
+      const a = itensA[i] || {}, p = itensP[i] || {};
+      const va = a.recibo, vp = p.recibo;
+      rows.push([
+        p.nome || a.nome || ("Item " + (i + 1)),
+        va === null || va === undefined ? "Conforme consumo" : fmtBRL(va),
+        vp === null || vp === undefined ? "Conforme consumo" : fmtBRL(vp),
+        typeof va === "number" && typeof vp === "number" ? fmtBRL(vp - va) : "Conforme consumo",
+        false,
+      ]);
+    }
+    if ((ra && typeof ra.totalRecibo === "number") || (rp && typeof rp.totalRecibo === "number")) {
+      const ta = ra && ra.totalRecibo, tp = rp && rp.totalRecibo;
+      rows.push(["TOTAL POR UNIDADE", fmtBRL(ta), fmtBRL(tp), typeof ta === "number" && typeof tp === "number" ? fmtBRL(tp - ta) : "—", true]);
+    }
+    return rows;
+  }
+  return [];
 }
 
 /* ---------- Monta a lista de slides a partir do que já foi preenchido ---------- */
@@ -2852,37 +3783,44 @@ function buildSlideSpecs() {
     if (item.role !== "assuntos") specs.push({ type: "divider", label: "Divisor", titulo: numero + ". " + item.texto }); // Assuntos Gerais: slide único (numerado abaixo)
 
     if (item.role === "prestacao") {
-      const a11 = PARSED.a11;
+      const prefixoAj = item.extraId ? item.extraId + ":" : "";
+      const a11 = item.a11 || PARSED.a11;
       if (a11) {
-        // Tabela e gráficos mostram os mesmos 12 meses do .pptx.
-        const months12 = pvMonthsSlice(a11.months, 12);
-        const months = months12;
-        const offset12 = a11.months.length - months12.length;
-        function sl12(arr) { return arr ? arr.slice(offset12) : months12.map(() => null); }
-        const sl = sl12;
-        if (a11.contasPlano && a11.contasPlano.length) {
-          // 1º o resumo só com grupos/subgrupos, depois o detalhamento com todas as contas (igual ao backend)
-          [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chave]) => {
-            const linhasRes = linhasResumo(a11, offset12, months12.length, soGrupos);
-            const pg = paginarTabela(linhasRes.length, "meses", chave);
-            pg.faixas.forEach(([i0, i1], pr) => {
-              const lote = linhasRes.slice(i0, i1);
-              const grande = lote.length + 1 <= PLANO_LINHAS_GRANDE;
-              const tit = tituloBase + (pg.faixas.length > 1 ? " (" + (pr + 1) + "/" + pg.faixas.length + ")" : "");
-              const lay = layoutTabela("meses", lote.length);
-              const fontePt = Math.min(lay.fontePt, fontePlanoMeses([].concat(...lote.map((l) => l[1].map((v) => fmtBRL(v)))), grande));
-              specs.push({
-                type: "tabela11a", label: tit, titulo: tit, months: months12, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
-                aj: { chave, tipo: "meses", pagina: pr, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: linhasRes.length },
+        const todosMeses = a11.months;
+        const p11Item = periodoMeses(todosMeses);
+        const nChunks = Math.max(1, Math.ceil(todosMeses.length / 12));
+        for (let ch = 0; ch < nChunks; ch++) {
+          const offset = ch * 12;
+          const months = todosMeses.slice(offset, offset + 12);
+          const sufCol = nChunks > 1 ? " — " + months[0] + " a " + months[months.length - 1] : "";
+          const sl = (arr) => (arr ? arr.slice(offset, offset + months.length) : months.map(() => null));
+          if (a11.contasPlano && a11.contasPlano.length) {
+            [[true, "Prestação de contas \u2014 Resumo", "resumo-grupos"], [false, "Prestação de contas", "resumo"]].forEach(([soGrupos, tituloBase, chaveBase]) => {
+              const chave = prefixoAj + chaveBase;
+              const linhasRes = linhasResumo(a11, offset, months.length, soGrupos);
+              const pg = paginarTabela(linhasRes.length, "meses", chave);
+              pg.faixas.forEach(([i0, i1], pr) => {
+                const lote = linhasRes.slice(i0, i1);
+                const grande = lote.length + 1 <= PLANO_LINHAS_GRANDE;
+                const tit = tituloBase + sufCol + (pg.faixas.length > 1 ? " (" + (pr + 1) + "/" + pg.faixas.length + ")" : "");
+                const lay = layoutTabela("meses", lote.length);
+                const valsTexto = [].concat(...lote.filter((l) => l[1] !== null).map((l) => l[1].map((v) => fmtBRL(v))));
+                const fontePt = Math.min(lay.fontePt, fontePlanoMeses(valsTexto, grande));
+                specs.push({
+                  type: "tabela11a", label: tit, titulo: tit, periodo: p11Item, months, rows: lote, grande, fontePt, alturaIn: lay.alturaIn,
+                  aj: { chave, tipo: "meses", pagina: pr, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: linhasRes.length },
+                });
               });
             });
-          });
-        } else {
-          specs.push({
-            type: "tabela11a", label: "Prestação de contas", titulo: "Prestação de contas", months: months12,
-            rows: [["Saldo anterior", sl12(a11.saldoAnterior), false, 0], ["Total de Receitas", sl12(a11.totalReceitas), true, 0], ["Total de Despesas", sl12(a11.totalDespesas), true, 0], ["Saldo Final", sl12(a11.saldoFinal), true, 0]],
-          });
+          } else {
+            specs.push({
+              type: "tabela11a", label: "Prestação de contas" + sufCol, titulo: "Prestação de contas" + sufCol, periodo: p11Item, months,
+              rows: [["Saldo anterior", sl(a11.saldoAnterior), false, 0], ["Total de Receitas", sl(a11.totalReceitas), true, 0], ["Total de Despesas", sl(a11.totalDespesas), true, 0], ["Saldo Final", sl(a11.saldoFinal), true, 0]],
+            });
+          }
         }
+        const months = todosMeses;
+        const sl = (arr) => (arr ? arr.slice() : months.map(() => null));
         // Barras: 6 meses por slide (igual ao backend) pra o rótulo de 14pt caber; mesma escala nas duas páginas
         {
           const rec = sl(a11.totalReceitas).map((v) => v || 0), desp = sl(a11.totalDespesas).map((v) => v || 0);
@@ -2893,7 +3831,7 @@ function buildSlideSpecs() {
             const suf = nPag > 1 ? " (" + (pb + 1) + "/" + nPag + ")" : "";
             specs.push({
               type: "chart", kind: "bars", label: "Receitas x Despesas" + suf,
-              months: months.slice(i0, i1), refMax,
+              periodo: p11Item, months: months.slice(i0, i1), refMax,
               series: [rec.slice(i0, i1), desp.slice(i0, i1)],
               colors: [PV_COLORS.chartBlue, PV_COLORS.chartRed],
               legend: ["Receitas", "Despesas"],
@@ -2907,7 +3845,7 @@ function buildSlideSpecs() {
           for (let pl = 0; pl < nPag; pl++) {
             const i0 = pl * LINHA_MESES_POR_SLIDE, i1 = i0 + LINHA_MESES_POR_SLIDE;
             const suf = nPag > 1 ? " (" + (pl + 1) + "/" + nPag + ")" : "";
-            specs.push({ type: "chart", kind: "line", label: nomeSerie + suf, months: months.slice(i0, i1), refMax, series: [vals.slice(i0, i1)], colors: [PV_COLORS.pptxPurple], legend: [nomeSerie], titulo: titulo + suf });
+            specs.push({ type: "chart", kind: "line", label: nomeSerie + suf, periodo: p11Item, months: months.slice(i0, i1), refMax, series: [vals.slice(i0, i1)], colors: [PV_COLORS.pptxPurple], legend: [nomeSerie], titulo: titulo + suf });
           }
         };
         if (a11.energiaEletrica) slidesLinha(a11.energiaEletrica, "Despesas com Energia Elétrica", "Energia Elétrica");
@@ -2916,36 +3854,49 @@ function buildSlideSpecs() {
         specs.push({ type: "placeholder", label: "Prestação de contas", titulo: "Prestação de contas", msg: "Busque ou envie o relatório 11A pra ver essa seção" });
       }
 
-      // Igual ao backend: o slide só existe se algum dado de inadimplência foi preenchido.
-      const temInad = ["f_inad_organica", "f_inad_garantidora", "f_inad_total", "f_inad_valor"].some((id) => document.getElementById(id).value.trim());
-      if (temInad) specs.push({
+      const ehCopiaPrest = !!item.extraId;
+      const inadObj = ehCopiaPrest
+        ? item.inadimplencia
+        : (["f_inad_organica", "f_inad_garantidora", "f_inad_total", "f_inad_valor"].some((id) => document.getElementById(id).value.trim())
+            ? {
+                valor: document.getElementById("f_inad_valor").value.trim(),
+                cobrancas: document.getElementById("f_inad_cobrancas").value.trim(),
+                unidades: document.getElementById("f_inad_unidades").value.trim(),
+                unidades_total: document.getElementById("f_inad_unidades_total").value.trim(),
+                organica: document.getElementById("f_inad_organica").value.trim(),
+                garantidora: document.getElementById("f_inad_garantidora").value.trim(),
+                total: document.getElementById("f_inad_total").value.trim(),
+              }
+            : null);
+
+      if (inadObj) specs.push({
         type: "inad", label: "Inadimplência",
-        valor: document.getElementById("f_inad_valor").value.trim(),
-        cobrancas: document.getElementById("f_inad_cobrancas").value.trim(),
-        unidades: document.getElementById("f_inad_unidades").value.trim(),
-        unidadesTotal: document.getElementById("f_inad_unidades_total").value.trim(),
-        organica: document.getElementById("f_inad_organica").value.trim(),
-        garantidora: document.getElementById("f_inad_garantidora").value.trim(),
-        total: document.getElementById("f_inad_total").value.trim(),
+        valor: inadObj.valor || "",
+        cobrancas: inadObj.cobrancas || "",
+        unidades: inadObj.unidades || "",
+        unidadesTotal: inadObj.unidades_total || "",
+        organica: inadObj.organica || "",
+        garantidora: inadObj.garantidora || "",
+        total: inadObj.total || "",
       });
 
-      // Resumo Financeiro (16B): contas, grupos de saldo e lançamentos de cada conta (mesma estrutura do backend)
-      if (PARSED.b16) {
-        const periodo16 = document.getElementById("f_16b_periodo").value.trim();
-        // Contas e grupos de saldo na mesma tabela/slide (igual ao backend: no máx. 14 linhas por slide)
-        const linhas16 = linhas16B(PARSED.b16);
+      const b16Obj = ehCopiaPrest ? item.b16 : PARSED.b16;
+      if (b16Obj) {
+        const periodo16 = ehCopiaPrest ? (item.periodo16b || "") : document.getElementById("f_16b_periodo").value.trim();
+        const p16Fmt = periodo16B(periodo16);
+        const linhas16 = linhas16B(b16Obj);
         const nPag16 = Math.max(1, Math.ceil(linhas16.length / 14));
         for (let pg16 = 0; pg16 < nPag16; pg16++) {
           const rot = "Resumo Financeiro" + (nPag16 > 1 ? " (" + (pg16 + 1) + "/" + nPag16 + ")" : "");
           const lote16 = linhas16.slice(pg16 * 14, (pg16 + 1) * 14);
-          const dim16 = dimTabela(lote16.length + 1, 2.2, 9.3, 24, 0.85); // igual a _dim_tabela no backend
-          specs.push({ type: "b16", label: rot, titulo: rot, periodo: periodo16B(periodo16), linhas: lote16, fontePt: dim16.fontePt, alturaIn: dim16.alturaIn });
+          const dim16 = dimTabela(lote16.length + 1, 2.2, 9.3, 24, 0.85);
+          specs.push({ type: "b16", label: rot, titulo: rot, periodo: p16Fmt, linhas: lote16, fontePt: dim16.fontePt, alturaIn: dim16.alturaIn });
         }
-        const MAX_LANCAMENTOS_POR_CONTA = 150; // mesma trava do backend — mantém a prévia fiel ao que realmente é gerado
+        const MAX_LANCAMENTOS_POR_CONTA = 150;
         const blocosM = [];
-        PARSED.b16.contas.forEach((conta) => {
+        b16Obj.contas.forEach((conta) => {
           if (!conta.movimentos || !conta.movimentos.length) return;
-          blocosM.push({ chave: "lanc:" + slugTabela(conta.nome), nome: conta.nome, itens: conta.movimentos.slice(0, MAX_LANCAMENTOS_POR_CONTA), excedente: Math.max(0, conta.movimentos.length - MAX_LANCAMENTOS_POR_CONTA) });
+          blocosM.push({ chave: prefixoAj + "lanc:" + slugTabela(conta.nome), nome: conta.nome, itens: conta.movimentos.slice(0, MAX_LANCAMENTOS_POR_CONTA), excedente: Math.max(0, conta.movimentos.length - MAX_LANCAMENTOS_POR_CONTA) });
         });
         fundirBlocos(blocosM, "lanc").forEach((un) => {
           const pg = paginarTabela(un.itens.length, "lanc", un.chave);
@@ -2959,17 +3910,20 @@ function buildSlideSpecs() {
             const lay = layoutTabela("lanc", lote.length);
             const nomeRot = juntarNomes(un.nomes, "contas");
             specs.push({
-              type: "b16mov", label: "Lançamentos " + nomeRot, titulo: "Lançamentos \u2014 " + nomeRot + sufixoPagina, movimentos: lote, nota, fontePt: lay.fontePt, alturaIn: lay.alturaIn,
+              type: "b16mov", label: "Lançamentos " + nomeRot, titulo: "Lançamentos \u2014 " + nomeRot + sufixoPagina, periodo: p16Fmt, movimentos: lote, nota, fontePt: lay.fontePt, alturaIn: lay.alturaIn,
               aj: { chave: un.chave, ultimaChave: un.ultimaChave, familia: "lanc", tipo: "lanc", pagina, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: un.itens.length, fundido: un.fundido, nomes: un.nomes },
             });
           });
         });
       }
+
     } else if (item.role === "previsao") {
-      if (PARSED.prev) {
-        const LINHAS_POR_SLIDE_PO = LINHAS_POR_TABELA; // igual a PREVISAO_LINHAS_POR_SLIDE em api/generate_pptx.py
-        const itens = PARSED.prev.itensCompletos && PARSED.prev.itensCompletos.length ? PARSED.prev.itensCompletos : PARSED.prev.categories.map((c) => ({ tipo: "subtotal", nome: c.nome, atualRaw: c.atual, previstoRaw: c.previsto }));
-        const blocosPv = segmentosPrevisao(itens).map((seg) => ({ chave: "previsao:" + slugTabela(seg.nome), nome: seg.nome, itens: seg.itens }));
+      const prefixoAj = item.extraId ? item.extraId + ":" : "";
+      const prevObj = item.previsao || PARSED.prev;
+      if (prevObj) {
+        const LINHAS_POR_SLIDE_PO = LINHAS_POR_TABELA;
+        const itens = prevObj.itensCompletos && prevObj.itensCompletos.length ? prevObj.itensCompletos : prevObj.categories.map((c) => ({ tipo: "subtotal", nome: c.nome, atualRaw: c.atual, previstoRaw: c.previsto }));
+        const blocosPv = segmentosPrevisao(itens).map((seg) => ({ chave: prefixoAj + "previsao:" + slugTabela(seg.nome), nome: seg.nome, itens: seg.itens }));
         fundirBlocos(blocosPv, "previsao").forEach((un) => {
           const pg = paginarTabela(un.itens.length, "previsao", un.chave);
           pg.faixas.forEach(([i0, i1], pagina) => {
@@ -2980,25 +3934,47 @@ function buildSlideSpecs() {
             const titulo = un.fundido ? "Previsão \u2014 " + juntarNomes(un.nomes, "grupos") + sufixoPagina : "Previsão \u2014 " + nomeT + sufixoPagina;
             const lay = layoutTabela("previsao", lote.length);
             specs.push({
-              type: "previsao", label: titulo, titulo, itens: lote, fontePt: lay.fontePt, alturaIn: lay.alturaIn, colunas: nomesColunasPrevisao(PARSED.prev), cab: un.fundido ? "Descrição" : cabecalhoCategoria(nome0),
+              type: "previsao", label: titulo, titulo, itens: lote, fontePt: lay.fontePt, alturaIn: lay.alturaIn, colunas: nomesColunasPrevisao(prevObj), cab: un.fundido ? "Descrição" : cabecalhoCategoria(nome0),
               aj: { chave: un.chave, ultimaChave: un.ultimaChave, familia: "previsao", tipo: "previsao", pagina, paginas: pg.faixas.length, linhasPagina: lote.length, L: pg.L, manual: pg.manual, nTotal: un.itens.length, fundido: un.fundido, nomes: un.nomes },
             });
           });
         });
-        // Slide de rateio (igual ao backend): duas tabelas grandes lado a lado + cartões de destaque embaixo
-        const prevR = PARSED.prev;
+        // Rateio dividido em 2 slides: 1) Média por unidade; 2) Por fração
+        const prevR = prevObj;
         if (prevR.rateioAtual || prevR.rateioPrevisto) {
           const cards = [];
+          let reajustePct = null;
           [prevR.rateioAtual, prevR.rateioPrevisto].forEach((b) => {
-            if (b && b.reajuste !== null && b.reajuste !== undefined) {
-              if (b.reajusteIsPercent) cards.push(["Reajuste do rateio", (b.reajuste * 100).toFixed(2).replace(".", ",") + "%"]);
-              else cards.push(["Diferença do rateio", "R$ " + fmtBRL(b.reajuste)]);
-            }
+            if (b && b.reajuste !== null && b.reajuste !== undefined && b.reajusteIsPercent) reajustePct = b.reajuste;
           });
+          if (reajustePct === null && prevR.rateioAtual && prevR.rateioPrevisto && prevR.rateioAtual.total > 0 && prevR.rateioPrevisto.total !== null) {
+            reajustePct = (prevR.rateioPrevisto.total / prevR.rateioAtual.total) - 1;
+          }
+          if (reajustePct === null && typeof prevR.totalDespesasAtual === "number" && prevR.totalDespesasAtual > 0 && typeof prevR.totalDespesasPrevisto === "number") {
+            reajustePct = (prevR.totalDespesasPrevisto / prevR.totalDespesasAtual) - 1;
+          }
+          if (reajustePct !== null) cards.push(["Reajuste do rateio", (reajustePct * 100).toFixed(2).replace(".", ",") + "%"]);
+
+          const diffMedia = calcularDiferencaMediaRateio(prevR);
+          if (diffMedia !== null) cards.push(["Diferença média por unidade", "R$ " + fmtBRL(diffMedia)]);
+
           if ((prevR.totalDespesasAtual !== null && prevR.totalDespesasAtual !== undefined) || (prevR.totalDespesasPrevisto !== null && prevR.totalDespesasPrevisto !== undefined)) {
             cards.push(["Total de despesas (atual \u2192 previsto)", fmtBRL(prevR.totalDespesasAtual) + " \u2192 " + fmtBRL(prevR.totalDespesasPrevisto)]);
           }
-          specs.push({ type: "rateio", label: "Previsão — Rateio", titulo: "Previsão orçamentária — Rateio", atual: prevR.rateioAtual, previsto: prevR.rateioPrevisto, cards });
+
+          const linhasMedia = montarLinhasMediaRateio(prevR);
+          if (linhasMedia.length) {
+            specs.push({ type: "rateio_media", label: "Rateio — Média por unidade", titulo: "Previsão orçamentária — Rateio (Média por unidade)", linhas: linhasMedia, cards });
+          }
+
+          const refItens = (prevR.rateioPrevisto && prevR.rateioPrevisto.itens) || (prevR.rateioAtual && prevR.rateioAtual.itens) || [];
+          const ehFracoes = refItens.length >= 2 && !refItens.every((it) => /^(cota|fundo|[áa]gua|taxa)/i.test(String(it.nome || "").trim()));
+          if (ehFracoes || !linhasMedia.length) {
+            const linhasFrac = montarLinhasRateioFracao(prevR, reajustePct);
+            if (linhasFrac.length) {
+              specs.push({ type: "rateio", label: "Rateio — Por fração", titulo: "Previsão orçamentária — Rateio por fração", linhas: linhasFrac, cards });
+            }
+          }
         }
       } else {
         specs.push({ type: "placeholder", label: "Previsão Orçamentária", titulo: "Previsão orçamentária", msg: "Envie a planilha de previsão orçamentária pra ver essa seção" });
@@ -3008,23 +3984,32 @@ function buildSlideSpecs() {
       specs.push({ type: "divider", label: "Assuntos gerais", titulo: numero + ". Assuntos Gerais" });
     } else if (item.eleicao && eleicaoDados(item.eleicao)) {
       especificarSlidesEleicao(eleicaoDados(item.eleicao)).forEach((sp) => specs.push(sp));
-    } else if (item.conteudo) {
-      const paginasB = paginarBullets(item.conteudo.split("\n").map((l) => l.trim()).filter(Boolean));
-      paginasB.forEach((pg, k) => {
-        const suf = paginasB.length > 1 ? " (" + (k + 1) + "/" + paginasB.length + ")" : "";
-        specs.push({ type: "bullets", label: item.texto + suf, titulo: item.texto + suf, itens: pg.itens, tam: pg.tam });
-      });
+    } else {
+      if (item.conteudo) {
+        const paginasB = paginarBullets(item.conteudo.split("\n").map((l) => l.trim()).filter(Boolean));
+        paginasB.forEach((pg, k) => {
+          const suf = paginasB.length > 1 ? " (" + (k + 1) + "/" + paginasB.length + ")" : "";
+          specs.push({ type: "bullets", label: item.texto + suf, titulo: item.texto + suf, itens: pg.itens, tam: pg.tam });
+        });
+      }
+      if (item.imagens && item.imagens.length) {
+        item.imagens.forEach((img, idxImg) => {
+          const sufImg = item.imagens.length > 1 ? " (" + (idxImg + 1) + "/" + item.imagens.length + ")" : "";
+          const tit = item.texto + sufImg;
+          specs.push({ type: "imagem", label: tit, titulo: tit, dataUrl: img.dataUrl });
+        });
+      }
     }
   });
 
-  // Período do relatório no cabeçalho dos slides que vêm dele (11A: meses exibidos; 16B: datas do extrato)
+  // Período do relatório no cabeçalho dos slides que vêm dele (sem sobrescrever cópias que já têm seu próprio período)
   {
-    const a11p = PARSED.a11, p11 = a11p ? periodoMeses(pvMonthsSlice(a11p.months, 12)) : "";
+    const a11p = PARSED.a11, p11 = a11p ? periodoMeses(a11p.months) : "";
     const p16 = PARSED.b16 ? periodo16B(document.getElementById("f_16b_periodo").value.trim()) : "";
     specs.forEach((sp) => {
-      if ((sp.type === "tabela11a" || sp.type === "chart") && p11) sp.periodo = p11;
-      else if (sp.type === "b16mov" && p16) sp.periodo = p16;
-      else if (sp.type === "inad") sp.periodo = "Posição em " + dataHojeBR();
+      if ((sp.type === "tabela11a" || sp.type === "chart") && !sp.periodo && p11) sp.periodo = p11;
+      else if (sp.type === "b16mov" && !sp.periodo && p16) sp.periodo = p16;
+      else if (sp.type === "inad" && !sp.periodo) sp.periodo = "Posição em " + dataHojeBR();
     });
   }
   specs.push({
@@ -3154,37 +4139,48 @@ function renderSlideHtmlBase(spec) {
       let t = '<table class="pv-table fin12' + (comSub ? " plano12 ajuste" : "") + '"' + estilo + '><colgroup><col style="width:' + wRot + '%;">' + spec.months.map(() => '<col style="width:' + wMes + '%;">').join("") + '</colgroup>' +
         "<tr><th>" + (comSub ? "Categoria" : "") + "</th>" + spec.months.map((m) => "<th>" + pvEsc(m) + "</th>").join("") + "</tr>";
       spec.rows.forEach(([label, arr, bold, nivel, sep]) => {
-        t += "<tr" + (sep ? ' class="sep"' : "") + "><td" + (bold ? ' class="bold"' : "") + (nivel ? ' style="padding-left:' + (0.5 + nivel * 0.9) + 'cqw;"' : "") + ">" + pvEsc(label) + "</td>" +
-          arr.map((v) => "<td" + (bold ? ' class="bold"' : "") + ">" + fmtBRL(v) + "</td>").join("") + "</tr>";
+        const celulas = arr === null
+          ? spec.months.map(() => "<td></td>").join("")
+          : arr.map((v) => "<td" + (bold ? ' class="bold"' : "") + ">" + fmtBRL(v) + "</td>").join("");
+        t += "<tr" + (sep ? ' class="sep"' : "") + "><td" + (bold ? ' class="bold"' : "") + (nivel ? ' style="padding-left:' + (0.5 + nivel * 0.9) + 'cqw;"' : "") + ">" + pvEsc(label) + "</td>" + celulas + "</tr>";
       });
       t += "</table>";
       return '<div class="pv-slide"><div class="pv-ct">' + pvEsc(spec.titulo || "Prestação de contas") + '</div><div class="pv-body" style="' + (comSub ? "" : "top:32%;") + '">' + t + "</div></div>";
     }
-    case "rateio": {
-      // Fontes em pt do backend convertidas pra cqw (pt * 0.0694); mesma regra de _dim_tabela (altura da linha cabe entre 2,4" e 7,6").
-      const nLinhas = Math.max((spec.atual && spec.atual.itens ? spec.atual.itens.length : 0), (spec.previsto && spec.previsto.itens ? spec.previsto.itens.length : 0)) + 2;
-      const altura = Math.min(0.62, 5.2 / nLinhas);
-      const fontePt = altura >= 0.62 * 0.85 ? 18 : altura >= 0.62 * 0.65 ? 16 : 12;
-      const cqw = (pt) => (pt * 100 / 72 / 20).toFixed(3) + "cqw";
-      const alturaCqw = (altura * 100 / 20).toFixed(3) + "cqw";
-      function blocoRateio(bloco, titulo) {
-        if (!bloco || !bloco.itens || !bloco.itens.length) return '<div style="flex:1;"></div>';
-        let t = '<div style="flex:1;"><p style="margin:0 0 .8cqw;font-weight:700;font-size:' + cqw(22) + ';color:#1D1339;">' + pvEsc(titulo) + '</p>' +
-          '<table class="pv-table" style="font-size:' + cqw(fontePt) + ';"><tr><th style="height:' + alturaCqw + ';">Fração</th><th>Recibo</th><th>Total Rateio</th></tr>';
-        bloco.itens.forEach((it) => {
-          const recibo = it.recibo === null || it.recibo === undefined ? "Conf. Consumo" : fmtBRL(it.recibo);
-          const tot = it.total === null || it.total === undefined ? "Conf. Consumo" : fmtBRL(it.total);
-          t += '<tr><td style="height:' + alturaCqw + ';">' + pvEsc(it.nome || "") + "</td><td>" + recibo + "</td><td>" + tot + "</td></tr>";
-        });
-        t += '<tr><td class="bold" style="height:' + alturaCqw + ';">TOTAL</td><td></td><td class="bold">' + fmtBRL(bloco.total) + "</td></tr></table></div>";
-        return t;
-      }
+
+    case "rateio_media": {
+      let t = '<table class="pv-table mid"><tr><th>Descrição</th><th>Atual (R$)</th><th>Previsto (R$)</th><th>Diferença (R$)</th></tr>';
+      spec.linhas.forEach(([desc, atual, previsto, diff, bold]) => {
+        const cls = bold ? ' class="bold"' : "";
+        t += "<tr><td" + cls + ">" + pvEsc(desc) + "</td><td" + cls + ">" + pvEsc(atual) + "</td><td" + cls + ">" + pvEsc(previsto) + "</td><td" + cls + ">" + pvEsc(diff) + "</td></tr>";
+      });
+      t += "</table>";
       const cards = spec.cards.length
         ? '<div class="pv-cards-row" style="position:absolute;left:0;right:0;top:' + ((7.9 - 1.55) * 100 / 20).toFixed(2) + 'cqw;gap:' + (0.4 * 100 / 20) + 'cqw;">' +
           spec.cards.map(([lbl, val]) => '<div class="pv-stat-card"><div class="val">' + pvEsc(val) + '</div><div class="lbl">' + pvEsc(lbl) + "</div></div>").join("") + "</div>"
         : "";
-      return '<div class="pv-slide">' + pvHeaderBar(spec.titulo) + '<div class="pv-body pv-rateio" style="top:' + (1.55 * 100 / 11.25).toFixed(2) + '%;"><div style="display:flex;gap:' + (0.4 * 100 / 20) + 'cqw;">' +
-        blocoRateio(spec.atual, "Rateio atual") + blocoRateio(spec.previsto, "Previsão (novo rateio)") + "</div>" + cards + "</div></div>";
+      return '<div class="pv-slide">' + pvHeaderBar(spec.titulo) + '<div class="pv-body pv-rateio" style="top:' + (1.55 * 100 / 11.25).toFixed(2) + '%;">' + t + cards + "</div></div>";
+    }
+
+    case "rateio": {
+      const cqw = (pt) => (pt * 100 / 72 / 20).toFixed(3) + "cqw";
+      let t = '<p style="margin:0 0 .8cqw;font-weight:700;font-size:' + cqw(22) + ';color:#1D1339;">Rateio atual x Rateio Previsto</p>' +
+        '<table class="pv-table mid"><tr><th>Fração</th><th>Atual (R$)</th><th>Previsto (R$)</th><th>Diferença (R$)</th></tr>';
+      (spec.linhas || []).forEach(([frac, atual, previsto, diff]) => {
+        t += "<tr><td>" + pvEsc(frac) + "</td><td>" + pvEsc(atual) + "</td><td>" + pvEsc(previsto) + "</td><td>" + pvEsc(diff) + "</td></tr>";
+      });
+      t += "</table>";
+      const cards = spec.cards.length
+        ? '<div class="pv-cards-row" style="position:absolute;left:0;right:0;top:' + ((7.9 - 1.55) * 100 / 20).toFixed(2) + 'cqw;gap:' + (0.4 * 100 / 20) + 'cqw;">' +
+          spec.cards.map(([lbl, val]) => '<div class="pv-stat-card"><div class="val">' + pvEsc(val) + '</div><div class="lbl">' + pvEsc(lbl) + "</div></div>").join("") + "</div>"
+        : "";
+      return '<div class="pv-slide">' + pvHeaderBar(spec.titulo) + '<div class="pv-body pv-rateio" style="top:' + (1.55 * 100 / 11.25).toFixed(2) + '%;">' + t + cards + "</div></div>";
+    }
+    case "imagem": {
+      return '<div class="pv-slide">' + pvHeaderBar(spec.titulo) +
+        '<div class="pv-body" style="display:flex;align-items:center;justify-content:center;top:14.5%;bottom:6%;">' +
+        '<img src="' + spec.dataUrl + '" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:0.4cqw;box-shadow:0 0.2cqw 0.8cqw rgba(0,0,0,0.12);">' +
+        "</div></div>";
     }
     case "plano": {
       const n = spec.months.length;
@@ -3576,7 +4572,12 @@ function buildResumo() {
   if (topicos.length || temAssuntos) {
     html += '<div class="resumo-section"><h4>Tópicos e assuntos gerais</h4>';
     topicos.forEach((t) => {
-      html += '<div class="resumo-row"><span class="k">' + pvEsc(t.texto) + '</span><span class="v">' + statusHtml(!!t.conteudo, "com conteúdo", "sem conteúdo — só o slide divisor", true) + '</span></div>';
+      const qtdAnexos = (t.imagens && t.imagens.length) || 0;
+      const temAlgo = !!(t.conteudo || qtdAnexos);
+      const rotuloOk = t.conteudo && qtdAnexos
+        ? "com texto e " + qtdAnexos + " anexo(s)"
+        : (qtdAnexos ? qtdAnexos + " slide(s) anexado(s)" : "com conteúdo");
+      html += '<div class="resumo-row"><span class="k">' + pvEsc(t.texto) + '</span><span class="v">' + statusHtml(temAlgo, rotuloOk, "sem conteúdo — só o slide divisor", true) + '</span></div>';
     });
     if (temAssuntos) {
       html += '<div class="resumo-row"><span class="k">Assuntos gerais</span><span class="v"><span class="resumo-status muted">— slide só com o título</span></span></div>';
@@ -3877,6 +4878,9 @@ document.getElementById("poAbaSel").addEventListener("change", (e) => {
     PO_MANUAL.importado = false;
     const data = parsePrevisao(PO_WB, e.target.value);
     PARSED.prev = data;
+    const unPlanilha = (data.rateioPrevisto && data.rateioPrevisto.unidades) || (data.rateioAtual && data.rateioAtual.unidades);
+    const elUnPo = document.getElementById("f_po_unidades_total");
+    if (unPlanilha && elUnPo && !elUnPo.value) elUnPo.value = String(unPlanilha);
     avisarCondominio("statuspo", nomeCondominioDoDocumento(linhasIniciaisDaAba(PO_WB, e.target.value)));
     setStatus("statuspo", true, 'lendo aba "' + data.sheetUsed + '"' + (data.condominioNome ? " (" + data.condominioNome + ")" : "") + " — " + data.categories.length + " categorias, total previsto " + fmtBRL(data.totalDespesasPrevisto, true));
     renderPreviewPO(data);
@@ -3898,4 +4902,26 @@ document.getElementById("poAbaSel").addEventListener("change", (e) => {
   });
   sync();
   new MutationObserver(sync).observe(nav, { subtree: true, childList: true, attributes: true, attributeFilter: ["data-label"] });
+})();
+
+(function syncUnidadesCondominio() {
+  const elInad = document.getElementById("f_inad_unidades_total");
+  const elPo = document.getElementById("f_po_unidades_total");
+  if (!elInad || !elPo) return;
+  elInad.addEventListener("input", () => { if (!elPo.dataset.editado) elPo.value = elInad.value; });
+  elPo.addEventListener("input", () => { elPo.dataset.editado = elPo.value ? "1" : ""; });
+})();
+
+(function setupDuplicacaoSecoes() {
+  const btnPrest = document.getElementById("btnDupPrestacao");
+  if (btnPrest) btnPrest.addEventListener("click", () => duplicarSecaoEstrutural("prestacao"));
+
+  const btnPrev = document.getElementById("btnDupPrevisao");
+  if (btnPrev) btnPrev.addEventListener("click", () => duplicarSecaoEstrutural("previsao"));
+
+  const prevOnSelect = window.onCondominioSelected;
+  window.onCondominioSelected = function (id) {
+    if (typeof prevOnSelect === "function") prevOnSelect(id);
+    document.querySelectorAll(".ext-11a-buscar, .ext-16b-buscar, .ext-inad-buscar").forEach((b) => { b.disabled = !id; });
+  };
 })();
