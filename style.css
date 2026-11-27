@@ -576,3 +576,19 @@ button.secondary:hover{border-color:var(--button);color:var(--button);}
 
 .aviso-cond{margin-top:8px;padding:10px 14px;border-radius:8px;border:1px solid #e0a100;background:#fff4d6;color:#6b4a00;font-size:14px;font-weight:600;line-height:1.4;}
 .aviso-cond[hidden]{display:none;}
+
+/* Anexos de imagens e PDF nas pautas livres */
+.topic-anexos-list{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
+.topic-anexo-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:#faf9fd;}
+.topic-anexo-thumb{width:54px;height:38px;object-fit:cover;border-radius:5px;border:1px solid var(--border);flex:none;background:#fff;}
+.topic-anexo-nome{flex:1;font-size:12.5px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.topic-anexo-acoes{display:flex;gap:4px;flex:none;}
+.topic-anexo-acoes button{padding:3px 7px;font-size:12px;border:1px solid var(--border);background:#fff;border-radius:6px;cursor:pointer;color:var(--text);}
+.topic-anexo-acoes button:hover:not([disabled]){border-color:var(--button);color:var(--button);}
+.topic-anexo-acoes button[disabled]{opacity:.35;cursor:not-allowed;}
+.topic-anexo-acoes button.del:hover{border-color:var(--danger);color:var(--danger);}
+
+/* Prévia de slide com imagem/PDF anexado e subtítulo do rateio unificado */
+.pv-anexo-wrap{width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+.pv-anexo-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:.5cqw;}
+.pv-rateio-sub{font-weight:700;font-size:1.45cqw;color:#1D1339;margin:0 0 .8cqw;}

@@ -1,8 +1,10 @@
+import base64
 import copy
 import math
 import io
 import re
 import unicodedata
+from PIL import Image as PILImage
 
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -1145,6 +1147,28 @@ def _linhas_media_rateio(prev, dados):
         return rows
     return []
 
+def _add_picture_fit(slide, data_url, img_w=None, img_h=None):
+    """Insere uma imagem (ou pagina de PDF convertida em imagem) centralizada na area util do slide."""
+    if not data_url or "," not in str(data_url):
+        return
+    raw = base64.b64decode(str(data_url).split(",", 1)[1])
+    try:
+        with PILImage.open(io.BytesIO(raw)) as im:
+            w_px, h_px = im.size
+    except Exception:
+        w_px, h_px = (img_w or 1600), (img_h or 900)
+    if not w_px or not h_px:
+        w_px, h_px = 1600, 900
+
+    box_x, box_y = 1.3, 1.85
+    box_w, box_h = 17.4, 7.6
+    escala = min(box_w / w_px, box_h / h_px)
+    w_in = w_px * escala
+    h_in = h_px * escala
+    left = Inches(box_x + (box_w - w_in) / 2)
+    top = Inches(box_y + (box_h - h_in) / 2)
+    slide.shapes.add_picture(io.BytesIO(raw), left, top, width=Inches(w_in), height=Inches(h_in))
+
 def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
     prs = Presentation(template_path)
 
@@ -1232,8 +1256,9 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             novo_divisor(f"{idx}. {item['texto']}")
 
         if role == "prestacao":
-            prefixo_aj = f"{item['extraId']}:" if item.get("extraId") else ""
-            a11 = item.get("a11") or dados.get("a11")
+            eh_copia = bool(item.get("extraId"))
+            prefixo_aj = f"{item['extraId']}:" if eh_copia else ""
+            a11 = item.get("a11") if eh_copia else dados.get("a11")
             if a11:
                 todos_meses = a11["months"]
                 periodo_11a = _periodo_meses(todos_meses)
@@ -1312,7 +1337,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 if a11.get("aguaEsgotoDespesa"):
                     _slides_linha("Despesas com Água / Esgoto", "Água / Esgoto", fatiar(a11["aguaEsgotoDespesa"]))
 
-            inad = item.get("inadimplencia") or dados.get("inadimplencia")
+            inad = item.get("inadimplencia") if eh_copia else dados.get("inadimplencia")
             if inad:
                 s5 = novo_conteudo("Inadimplência")
                 if inad.get("posicao"):
@@ -1344,9 +1369,9 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                 ]
                 add_table(s5, Inches(1.3), ["Indicador", "Valor"], [[(r[0][0], r[0][1]), (r[1][0], r[1][1])] for r in rows_inad], [13.4, 4.0], font_size=18, height_in=0.7, y=Inches(4.6))
 
-            b16 = item.get("b16") or dados.get("b16")
+            b16 = item.get("b16") if eh_copia else dados.get("b16")
             if b16:
-                periodo_16_raw = item.get("periodo16b") if "periodo16b" in item else dados.get("periodo16b", "")
+                periodo_16_raw = (item.get("periodo16b") or "") if eh_copia else dados.get("periodo16b", "")
                 periodo_16 = _periodo_16b(periodo_16_raw)
                 contas16 = b16["contas"]
                 headers16 = ["Conta", "Saldo anterior", "Créditos", "Débitos", "Saldo final"]
@@ -1385,7 +1410,7 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     movs_completos = conta.get("movimentos") or []
                     if not movs_completos:
                         continue
-                    blocos_m.append({"chave": f"lanc:{_slug(conta['nome'])}", "nome": conta["nome"], "itens": movs_completos[:MAX_LANCAMENTOS_POR_CONTA],
+                    blocos_m.append({"chave": f"{prefixo_aj}lanc:{_slug(conta['nome'])}", "nome": conta["nome"], "itens": movs_completos[:MAX_LANCAMENTOS_POR_CONTA],
                                      "excedente": max(0, len(movs_completos) - MAX_LANCAMENTOS_POR_CONTA)})
                 for un in _fundir_blocos(blocos_m, "lanc", dados.get("ajustes")):
                     movs = un["itens"]
@@ -1422,9 +1447,16 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
             n_cols = len(colunas)
 
             def _txt_po(v):
-                if isinstance(v, str) and "consumo" in v.lower():
+                if v is None:
+                    return "-"
+                if isinstance(v, (int, float)):
+                    return fmt_brl(v)
+                s = str(v).strip()
+                if not s or s in ("-", "—"):
+                    return "-"
+                if "consumo" in s.lower():
                     return "Conforme consumo"
-                return fmt_brl(v if isinstance(v, (int, float)) else None)
+                return s
 
             def _valores_po(it):
                 v = list(it["valores"]) if it.get("valores") is not None else [it.get("atualRaw"), it.get("previstoRaw")]
@@ -1460,23 +1492,34 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
 
             rateio_atual = prev.get("rateioAtual")
             rateio_previsto = prev.get("rateioPrevisto")
-            if rateio_atual or rateio_previsto:
+            tot_a = prev.get("totalDespesasAtual") if isinstance(prev.get("totalDespesasAtual"), (int, float)) else (rateio_atual.get("total") if rateio_atual else None)
+            tot_p = prev.get("totalDespesasPrevisto") if isinstance(prev.get("totalDespesasPrevisto"), (int, float)) else (rateio_previsto.get("total") if rateio_previsto else None)
+
+            if rateio_atual or rateio_previsto or (isinstance(tot_a, (int, float)) and isinstance(tot_p, (int, float))):
                 destaques = []
                 reajuste_pct = None
                 for bloco in (rateio_atual, rateio_previsto):
                     if bloco and bloco.get("reajuste") is not None and bloco.get("reajusteIsPercent"):
                         reajuste_pct = bloco["reajuste"]
+                if reajuste_pct is None and isinstance(tot_a, (int, float)) and tot_a > 0 and isinstance(tot_p, (int, float)):
+                    reajuste_pct = (tot_p / tot_a) - 1.0
                 if reajuste_pct is None and rateio_atual and rateio_previsto and isinstance(rateio_atual.get("total"), (int, float)) and rateio_atual["total"] > 0 and isinstance(rateio_previsto.get("total"), (int, float)):
                     reajuste_pct = (rateio_previsto["total"] / rateio_atual["total"]) - 1.0
                 if reajuste_pct is not None:
                     destaques.append(("Reajuste do rateio", f"{reajuste_pct*100:.2f}".replace(".", ",") + "%"))
 
-                diff_media = _diferenca_media_rateio(prev)
+                un_rateio = (
+                    _int_ou_none(prev.get("unidadesTotal"))
+                    or (_int_ou_none(rateio_previsto.get("unidades")) if rateio_previsto else None)
+                    or (_int_ou_none(rateio_atual.get("unidades")) if rateio_atual else None)
+                    or _int_ou_none((dados.get("inadimplencia") or {}).get("unidades_total"))
+                )
+                diff_media = ((tot_p - tot_a) / un_rateio) if (un_rateio and un_rateio > 0 and isinstance(tot_a, (int, float)) and isinstance(tot_p, (int, float))) else _diferenca_media_rateio(prev)
                 if diff_media is not None:
                     destaques.append(("Diferença média por unidade", "R$ " + fmt_brl(diff_media)))
 
-                if prev.get("totalDespesasAtual") is not None or prev.get("totalDespesasPrevisto") is not None:
-                    destaques.append(("Total de despesas (atual \u2192 previsto)", fmt_brl(prev.get("totalDespesasAtual")) + " \u2192 " + fmt_brl(prev.get("totalDespesasPrevisto"))))
+                if tot_a is not None or tot_p is not None:
+                    destaques.append(("Total de despesas (atual \u2192 previsto)", fmt_brl(tot_a) + " \u2192 " + fmt_brl(tot_p)))
 
                 # Slide 1: Rateio (Media por unidade)
                 linhas_media = _linhas_media_rateio(prev, dados)
@@ -1488,34 +1531,51 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     if destaques:
                         add_stat_cards(s_media, Inches(1.3), Inches(7.9), destaques, width_total_in=17.4, height_in=1.5, gap_in=0.4)
 
-                # Slide 2: Rateio por fracao
-                ref_itens = (rateio_previsto.get("itens") if rateio_previsto else None) or (rateio_atual.get("itens") if rateio_atual else None) or []
+                # Slide 2: Rateio por fracao (tabela unificada Atual x Previsto x Diferenca)
+                itens_a = (rateio_atual.get("itens") or []) if rateio_atual else []
+                itens_p = (rateio_previsto.get("itens") or []) if rateio_previsto else []
+                ref_itens = itens_p or itens_a
                 eh_fracoes = len(ref_itens) >= 2 and not all(re.match(r"^(cota|fundo|[áa]gua|taxa)", (it.get("nome") or "").strip(), re.I) for it in ref_itens)
                 if eh_fracoes or not linhas_media:
                     s_rateio = novo_conteudo("Previsão orçamentária — Rateio por fração")
-                    blocos = [b for b in (rateio_atual, rateio_previsto) if b and b.get("itens")]
-                    n_linhas = (max(len(b["itens"]) for b in blocos) + 2) if blocos else 0
-                    fonte_r, altura_r = _dim_tabela(n_linhas, 2.4, fim_in=7.6, fonte_base=18, altura_base=0.62)
+                    tb_sub = s_rateio.shapes.add_textbox(Inches(1.3), Inches(1.55), Inches(17.4), Inches(0.5))
+                    tf_sub = tb_sub.text_frame
+                    tf_sub.text = "Rateio atual x Rateio Previsto"
+                    tf_sub.paragraphs[0].font.size = Pt(22)
+                    tf_sub.paragraphs[0].font.bold = True
+                    tf_sub.paragraphs[0].font.color.rgb = DARK_PURPLE
 
-                    def _add_rateio_table(slide_r, x, bloco, titulo):
-                        if not bloco or not bloco.get("itens"):
-                            return
-                        tb = slide_r.shapes.add_textbox(x, Inches(1.55), Inches(8.5), Inches(0.6))
-                        tf = tb.text_frame
-                        tf.text = titulo
-                        tf.paragraphs[0].font.size = Pt(22)
-                        tf.paragraphs[0].font.bold = True
-                        tf.paragraphs[0].font.color.rgb = DARK_PURPLE
-                        rows = []
-                        for it in bloco["itens"]:
-                            recibo = "Conforme consumo" if it.get("recibo") is None else fmt_brl(it.get("recibo"))
-                            total_r = "Conforme consumo" if it.get("total") is None else fmt_brl(it.get("total"))
-                            rows.append([it.get("nome", ""), recibo, total_r])
-                        rows.append([("TOTAL", True), "", (fmt_brl(bloco.get("total")), True)])
-                        add_table(slide_r, x, ["Fração", "Recibo", "Total Rateio"], rows, [3.3, 2.6, 2.6], font_size=fonte_r, height_in=altura_r, y=Inches(2.4))
+                    usados_p = set()
+                    rows_frac = []
+                    fator = (1.0 + reajuste_pct) if isinstance(reajuste_pct, (int, float)) else None
+                    for idx_a, a in enumerate(itens_a):
+                        na = (a.get("nome") or "").strip().lower()
+                        idx_p = next((k for k, p in enumerate(itens_p) if k not in usados_p and (p.get("nome") or "").strip().lower() == na), None)
+                        if idx_p is None and idx_a < len(itens_p) and idx_a not in usados_p:
+                            idx_p = idx_a
+                        p = itens_p[idx_p] if idx_p is not None else {}
+                        if idx_p is not None:
+                            usados_p.add(idx_p)
+                        va, vp = a.get("recibo"), p.get("recibo")
+                        if vp is None and not itens_p and isinstance(va, (int, float)) and fator is not None:
+                            vp = round(va * fator, 2)
+                        diff_v = fmt_brl(vp - va) if isinstance(va, (int, float)) and isinstance(vp, (int, float)) else ("Conforme consumo" if va is None else "-")
+                        rows_frac.append([
+                            a.get("nome") or p.get("nome") or f"Fração {idx_a + 1}",
+                            "Conforme consumo" if va is None else fmt_brl(va),
+                            "Conforme consumo" if (vp is None and itens_p and p.get("nome")) else ("-" if vp is None else fmt_brl(vp)),
+                            diff_v,
+                        ])
+                    for idx_p, p in enumerate(itens_p):
+                        if idx_p in usados_p:
+                            continue
+                        vp = p.get("recibo")
+                        rows_frac.append([p.get("nome") or f"Fração {idx_p + 1}", "-", "Conforme consumo" if vp is None else fmt_brl(vp), "-"])
 
-                    _add_rateio_table(s_rateio, Inches(1.3), rateio_atual, "Rateio atual")
-                    _add_rateio_table(s_rateio, Inches(10.2), rateio_previsto, "Previsão (novo rateio)")
+                    if rows_frac:
+                        f_fr, h_fr = _dim_tabela(len(rows_frac) + 1, 2.25, fim_in=7.55, fonte_base=20, altura_base=0.68)
+                        add_table(s_rateio, Inches(1.3), ["Fração", "Atual (R$)", "Previsto (R$)", "Diferença (R$)"],
+                                  rows_frac, [7.8, 3.2, 3.2, 3.2], font_size=f_fr, height_in=h_fr, y=Inches(2.25))
                     if destaques:
                         add_stat_cards(s_rateio, Inches(1.3), Inches(7.9), destaques, width_total_in=17.4, height_in=1.5, gap_in=0.4)
 
@@ -1535,6 +1595,11 @@ def gerar_apresentacao_bytes(dados, template_path="modelo.pptx"):
                     sufixo_b = f" ({pb}/{len(paginas_b)})" if len(paginas_b) > 1 else ""
                     s = novo_conteudo(item["texto"] + sufixo_b)
                     add_bullets(s, Inches(1.3), itens_b, y=Inches(1.9), height_in=BULLETS_ALTURA_IN, width_in=17.4, font_size=tam_b)
+            anexos = item.get("anexos") or item.get("imagens") or []
+            for pa, anx in enumerate(anexos, start=1):
+                sufixo_a = f" ({pa}/{len(anexos)})" if len(anexos) > 1 else ""
+                sa = novo_conteudo(item["texto"] + sufixo_a)
+                _add_picture_fit(sa, anx.get("dataUrl"), anx.get("width"), anx.get("height"))
 
     slide4 = prs.slides[3]
     canais = dados.get("canais", {})
